@@ -14,11 +14,13 @@ const hudTop = document.getElementById("hudTop");
 const endScreen = document.getElementById("endScreen");
 const endTitle = document.getElementById("endTitle");
 const endMessage = document.getElementById("endMessage");
+const endHomeBtn = document.getElementById("endHomeBtn");
 const nameInput = document.getElementById("name");
 const roomCodeInput = document.getElementById("roomCode");
 const createBtn = document.getElementById("createBtn");
 const joinBtn = document.getElementById("joinBtn");
 const startBtn = document.getElementById("startBtn");
+const leaveLobbyBtn = document.getElementById("leaveLobbyBtn");
 const homeError = document.getElementById("homeError");
 const lobbyError = document.getElementById("lobbyError");
 const lobbyCodeEl = document.getElementById("lobbyCode");
@@ -33,6 +35,8 @@ const roleHud = document.getElementById("roleHud");
 const timerHud = document.getElementById("timerHud");
 const aliveHud = document.getElementById("aliveHud");
 const killBtn = document.getElementById("killBtn");
+const powerPicker = document.getElementById("powerPicker");
+const powerBar = document.getElementById("powerBar");
 
 const COLOR_OPTIONS = [
   "#ef4444",
@@ -50,7 +54,29 @@ const COLOR_OPTIONS = [
 const VIEW_RADIUS = 340;
 const KILL_RANGE = 52;
 
-const socket = io();
+const POWER_CATALOG = {
+  portal: {
+    emoji: "🌀",
+    name: "Portail",
+    hint: "1er clic : pose — 2e : téléporte",
+  },
+  invisible: {
+    emoji: "👻",
+    name: "Invisibilité",
+    hint: "Invisible 4 secondes",
+  },
+  speed: {
+    emoji: "⚡",
+    name: "Rapidité",
+    hint: "Vitesse x1.4 pendant 4s",
+  },
+};
+
+const POWER_ORDER = ["portal", "invisible", "speed"];
+
+const JOIN_WAIT_MS = 8000;
+const socket = io({ reconnection: false });
+let joinPending = null;
 let myId = null;
 let isHost = false;
 let roomCode = null;
@@ -65,6 +91,7 @@ let killPressed = false;
 let camera = { x: 0, y: 0 };
 let visibility = null;
 let controlMode = null;
+let myPowers = { portal: true, invisible: true, speed: true };
 const joystick = { active: false, vx: 0, vy: 0, pointerId: null };
 const JOY_RADIUS = 48;
 
@@ -82,6 +109,51 @@ function hideErrors() {
   lobbyError.classList.add("hidden");
 }
 
+function setHomeButtonsDisabled(disabled) {
+  createBtn.disabled = disabled;
+  joinBtn.disabled = disabled;
+}
+
+function clearJoinPending() {
+  if (joinPending) {
+    clearTimeout(joinPending);
+    joinPending = null;
+  }
+  setHomeButtonsDisabled(false);
+}
+
+function resetSession() {
+  clearJoinPending();
+  myId = socket.id;
+  isHost = false;
+  roomCode = null;
+  myRole = null;
+  myColor = COLOR_OPTIONS[0];
+  state = null;
+  lobbyData = null;
+  controlMode = null;
+  killPressed = false;
+  endScreen.classList.add("hidden");
+  endCard.classList.remove("victory", "defeat");
+}
+
+function applyLobbyData(data) {
+  if (!data) return;
+  lobbyData = data;
+  isHost = data.hostId === myId;
+  if (data.settings) {
+    impostorSelect.value = String(data.settings.impostors);
+    timerSelect.value = String(data.settings.timerSec);
+  }
+  const me = data.players.find((p) => p.id === myId);
+  if (me) {
+    myColor = me.color;
+    if (me.powers) myPowers = { ...me.powers };
+  }
+  updateLobbyUi();
+  updatePowerPickerUi();
+}
+
 function showHome() {
   phase = "home";
   screenHome.classList.remove("hidden");
@@ -90,9 +162,17 @@ function showHome() {
   hudTop.classList.add("hidden");
   endScreen.classList.add("hidden");
   killBtn.classList.add("hidden");
+  powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
   screenControls.classList.add("hidden");
   controlMode = null;
+  clearJoinPending();
+}
+
+function leaveToHome() {
+  socket.emit("leaveRoom");
+  resetSession();
+  showHome();
 }
 
 function showLobby() {
@@ -103,6 +183,7 @@ function showLobby() {
   hudTop.classList.add("hidden");
   endScreen.classList.add("hidden");
   killBtn.classList.add("hidden");
+  powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
   screenControls.classList.add("hidden");
 }
@@ -115,6 +196,7 @@ function showControlPicker() {
   overlay.classList.remove("hidden");
   hudTop.classList.add("hidden");
   killBtn.classList.add("hidden");
+  powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
 }
 
@@ -124,7 +206,10 @@ function beginWithControlMode(mode) {
   overlay.classList.add("hidden");
   joystickZone.classList.toggle("hidden", mode !== "mobile");
   if (mode === "mobile") resetJoystick();
+  endScreen.classList.add("hidden");
+  buildPowerBar();
   showGame();
+  if (state?.gameOver) updateEndScreen(state);
 }
 
 function showGame() {
@@ -156,6 +241,72 @@ function buildColorPicker() {
   }
 }
 buildColorPicker();
+
+function updatePowerPickerUi() {
+  document.querySelectorAll(".power-toggle").forEach((btn) => {
+    const id = btn.dataset.power;
+    btn.classList.toggle("equipped", Boolean(myPowers[id]));
+  });
+}
+
+function buildPowerPicker() {
+  powerPicker.innerHTML = "";
+  for (const id of POWER_ORDER) {
+    const def = POWER_CATALOG[id];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "power-toggle equipped";
+    btn.dataset.power = id;
+    btn.innerHTML = `
+      <span class="power-emoji">${def.emoji}</span>
+      <span class="power-meta">
+        <strong>${def.name}</strong>
+        <span>${def.hint}</span>
+      </span>`;
+    btn.addEventListener("click", () => {
+      const next = { ...myPowers, [id]: !myPowers[id] };
+      const count = POWER_ORDER.filter((k) => next[k]).length;
+      if (count === 0) return;
+      myPowers = next;
+      updatePowerPickerUi();
+      socket.emit("setPowers", myPowers);
+    });
+    powerPicker.appendChild(btn);
+  }
+}
+buildPowerPicker();
+
+function buildPowerBar() {
+  powerBar.innerHTML = "";
+  for (const id of POWER_ORDER) {
+    if (!myPowers[id]) continue;
+    const def = POWER_CATALOG[id];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "power-btn";
+    btn.dataset.power = id;
+    btn.textContent = `${def.emoji} ${def.name}`;
+    btn.addEventListener("click", () => {
+      if (phase !== "playing" || state?.gameOver) return;
+      socket.emit("usePower", id);
+    });
+    powerBar.appendChild(btn);
+  }
+}
+
+function updatePowerBarUi(me) {
+  const show = phase === "playing" && controlMode && me?.alive && !state?.gameOver;
+  powerBar.classList.toggle("hidden", !show || powerBar.children.length === 0);
+  if (!show) return;
+  for (const btn of powerBar.children) {
+    const id = btn.dataset.power;
+    if (id === "portal") {
+      const hasPortal = Boolean(me.portal);
+      btn.classList.toggle("portal-ready", hasPortal);
+      btn.textContent = hasPortal ? "🌀 Téléporter" : "🌀 Poser portail";
+    }
+  }
+}
 
 pickDesktop.addEventListener("click", () => beginWithControlMode("desktop"));
 pickMobile.addEventListener("click", () => beginWithControlMode("mobile"));
@@ -235,19 +386,49 @@ roomCodeInput.addEventListener("input", () => {
   roomCodeInput.value = roomCodeInput.value.replace(/\D/g, "").slice(0, 3);
 });
 
+function beginJoinAttempt() {
+  clearJoinPending();
+  setHomeButtonsDisabled(true);
+  joinPending = setTimeout(() => {
+    joinPending = null;
+    setHomeButtonsDisabled(false);
+    if (phase === "home") {
+      showError(homeError, "Le serveur ne répond pas. Vérifie qu’il est lancé (npm start).");
+    }
+  }, JOIN_WAIT_MS);
+}
+
 createBtn.addEventListener("click", () => {
   hideErrors();
+  if (!socket.connected) {
+    showError(homeError, "Pas de connexion au serveur. Lance npm start puis réessaie.");
+    return;
+  }
+  beginJoinAttempt();
   socket.emit("createRoom", getName());
 });
 
 joinBtn.addEventListener("click", () => {
   hideErrors();
-  const code = roomCodeInput.value.trim();
-  if (code.length !== 3) {
-    showError(homeError, "Entre un code à 3 chiffres.");
+  if (!socket.connected) {
+    showError(homeError, "Pas de connexion au serveur. Lance npm start puis réessaie.");
     return;
   }
+  const code = roomCodeInput.value.trim();
+  if (code.length < 1) {
+    showError(homeError, "Entre le code à 3 chiffres.");
+    return;
+  }
+  beginJoinAttempt();
   socket.emit("joinRoom", { code, name: getName() });
+});
+
+leaveLobbyBtn.addEventListener("click", () => {
+  leaveToHome();
+});
+
+endHomeBtn.addEventListener("click", () => {
+  leaveToHome();
 });
 
 startBtn.addEventListener("click", () => {
@@ -267,43 +448,66 @@ impostorSelect.addEventListener("change", emitSettings);
 timerSelect.addEventListener("change", emitSettings);
 
 socket.on("errorMsg", ({ message }) => {
+  clearJoinPending();
   if (phase === "home") showError(homeError, message);
   else showError(lobbyError, message);
 });
 
-socket.on("joinedRoom", ({ id, code, isHost: host }) => {
+socket.on("joinedRoom", ({ id, code, isHost: host, lobby }) => {
+  clearJoinPending();
   myId = id;
   roomCode = code;
   isHost = host;
+  state = null;
+  myRole = null;
+  controlMode = null;
+  endScreen.classList.add("hidden");
   lobbyCodeEl.textContent = code;
   roomHud.textContent = `Salle ${code}`;
+  roomCodeInput.value = code;
   showLobby();
-  updateLobbyUi();
+  applyLobbyData(lobby);
+});
+
+socket.on("leftRoom", () => {
+  resetSession();
+  showHome();
 });
 
 socket.on("lobby", (data) => {
-  lobbyData = data;
-  isHost = data.hostId === myId;
-  if (data.settings) {
-    impostorSelect.value = String(data.settings.impostors);
-    timerSelect.value = String(data.settings.timerSec);
+  applyLobbyData(data);
+  if (data.status === "playing" && (phase === "lobby" || phase === "controlPick") && !myRole) {
+    socket.emit("syncGame");
   }
-  const me = data.players.find((p) => p.id === myId);
-  if (me) myColor = me.color;
-  updateLobbyUi();
 });
 
 socket.on("gameStarted", ({ role }) => {
+  clearJoinPending();
   myRole = role;
+  state = null;
+  controlMode = null;
   roleHud.textContent = role === "impostor" ? "Rôle : Imposteur" : "Rôle : Innocent";
+  endScreen.classList.add("hidden");
+  endCard.classList.remove("victory", "defeat");
+  if (phase === "playing" && controlMode) return;
   showControlPicker();
 });
 
+socket.on("disconnect", () => {
+  clearJoinPending();
+  if (phase !== "home") {
+    showError(homeError, "Connexion perdue. Recharge la page pour rejouer.");
+    resetSession();
+    showHome();
+  }
+});
+
 function updateEndScreen(s) {
-  if (!s.gameOver) return;
+  if (!s.gameOver || phase !== "playing" || !controlMode) return;
   endScreen.classList.remove("hidden");
   joystickZone.classList.add("hidden");
   killBtn.classList.add("hidden");
+  powerBar.classList.add("hidden");
   endCard.classList.remove("victory", "defeat");
 
   const innocentWin = s.winner === "innocents";
@@ -328,12 +532,21 @@ function updateEndScreen(s) {
 }
 
 socket.on("state", (s) => {
+  if (phase === "home" || phase === "lobby") return;
+  if (phase === "controlPick") {
+    if (!s.gameOver) state = s;
+    return;
+  }
   state = s;
   updateEndScreen(s);
 });
 
 function updateLobbyUi() {
-  if (!lobbyData) return;
+  if (!lobbyData) {
+    playerList.innerHTML = "";
+    lobbyStatus.textContent = "Chargement du lobby…";
+    return;
+  }
   lobbyCodeEl.textContent = lobbyData.code;
   hostSettings.classList.toggle("hidden", !isHost);
 
@@ -369,9 +582,11 @@ function updateLobbyUi() {
 
   if (lobbyData.status === "playing") {
     startBtn.classList.add("hidden");
-    lobbyStatus.textContent = "La partie commence…";
+    leaveLobbyBtn.classList.add("hidden");
+    lobbyStatus.textContent = "La partie commence… choisis Ordinateur ou Téléphone.";
     return;
   }
+  leaveLobbyBtn.classList.remove("hidden");
 
   if (isHost) {
     startBtn.classList.remove("hidden");
@@ -482,6 +697,7 @@ function computeVisibility(map, px, py) {
 }
 
 function canSeePlayer(me, other, maze, tile) {
+  if (other.hidden && other.id !== myId) return false;
   if (!other.alive) {
     return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile);
   }
@@ -549,6 +765,23 @@ function drawFog(map, vis) {
   }
 }
 
+function drawPortal(portal) {
+  if (!portal) return;
+  ctx.save();
+  ctx.translate(portal.x, portal.y);
+  ctx.strokeStyle = "#22d3ee";
+  ctx.lineWidth = 3;
+  ctx.shadowColor = "#22d3ee";
+  ctx.shadowBlur = 14;
+  ctx.beginPath();
+  ctx.arc(0, 0, 16, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(34, 211, 238, 0.25)";
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
 function drawPlayerCube(p, isMe, dead) {
   const size = 26;
   ctx.save();
@@ -557,6 +790,8 @@ function drawPlayerCube(p, isMe, dead) {
 
   if (dead) {
     ctx.globalAlpha = 0.45;
+  } else if (p.hidden && isMe) {
+    ctx.globalAlpha = 0.35;
   }
 
   ctx.fillStyle = "rgba(0,0,0,0.35)";
@@ -611,6 +846,7 @@ function updateHud() {
   timerHud.textContent = `Temps ${formatTime(state.timeLeftMs || 0)}`;
   aliveHud.textContent = `Innocents vivants : ${state.innocentsAlive ?? "—"}`;
   updateKillButton(state.players[myId]);
+  updatePowerBarUi(state.players[myId]);
 }
 
 function render() {
@@ -635,6 +871,14 @@ function render() {
   if (visibility) {
     drawMaze(state.map, visibility);
     if (me) drawPlayerGlow(me.x, me.y);
+  }
+
+  for (const p of Object.values(state.players)) {
+    if (!p.portal) continue;
+    const portalVisible =
+      p.id === myId ||
+      (me && hasLineOfSight(me.x, me.y, p.portal.x, p.portal.y, state.map.maze, state.map.tile));
+    if (portalVisible) drawPortal(p.portal);
   }
 
   const sorted = Object.values(state.players).sort((a, b) => a.y - b.y);

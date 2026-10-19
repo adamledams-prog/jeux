@@ -12,6 +12,14 @@ const PLAYER_RADIUS = 14;
 const PLAYER_SPEED = 180;
 const KILL_RANGE = 52;
 const KILL_COOLDOWN_MS = 25000;
+const POWER_DURATION_MS = 4000;
+const POWER_COOLDOWN_MS = 6000;
+const SPEED_BOOST_MULT = 1.4;
+const POWER_IDS = ["portal", "invisible", "speed"];
+
+function defaultPowers() {
+  return { portal: true, invisible: true, speed: true };
+}
 
 const TIMER_OPTIONS = [90, 120, 150, 180];
 const COLOR_OPTIONS = [
@@ -175,12 +183,42 @@ function defaultSettings() {
   return { impostors: 1, timerSec: 120 };
 }
 
-function lobbyPlayer(id, name) {
+function pickFreeColor(room) {
+  const used = new Set([...room.players.values()].map((p) => p.color));
+  for (const color of COLOR_OPTIONS) {
+    if (!used.has(color)) return color;
+  }
+  return COLOR_OPTIONS[Math.floor(Math.random() * COLOR_OPTIONS.length)];
+}
+
+function lobbyPlayer(id, name, room) {
   return {
     id,
     name: (name || "Joueur").slice(0, 16),
-    color: COLOR_OPTIONS[0],
+    color: pickFreeColor(room),
+    powers: defaultPowers(),
   };
+}
+
+function lobbyPayload(room) {
+  return {
+    code: room.code,
+    hostId: room.hostId,
+    status: room.status,
+    settings: room.settings,
+    players: [...room.players.values()].map((p) => ({
+      id: p.id,
+      name: p.name,
+      color: p.color,
+      powers: p.powers || defaultPowers(),
+    })),
+  };
+}
+
+function normalizeRoomCode(raw) {
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (digits.length === 0) return "";
+  return digits.padStart(3, "0").slice(-3);
 }
 
 function initGameFields(p) {
@@ -191,25 +229,67 @@ function initGameFields(p) {
   p.vx = 0;
   p.vy = 0;
   p.alive = true;
+  p.online = true;
   p.role = "innocent";
   p.lastKill = 0;
+  p.portal = null;
+  p.invisibleUntil = 0;
+  p.speedUntil = 0;
+  p.powerCooldownUntil = { invisible: 0, speed: 0 };
+  if (!p.powers) p.powers = defaultPowers();
   const fixed = pushCircleOutOfWalls(p.x, p.y, PLAYER_RADIUS);
   p.x = fixed.x;
   p.y = fixed.y;
 }
 
+function isPlayerActive(p) {
+  return p && p.online !== false;
+}
+
 function countAliveByRole(room, role) {
   let n = 0;
   for (const p of room.players.values()) {
-    if (p.alive && p.role === role) n++;
+    if (!isPlayerActive(p) || !p.alive || p.role !== role) continue;
+    n++;
   }
   return n;
 }
 
+function countOnlinePlayers(room) {
+  let n = 0;
+  for (const p of room.players.values()) {
+    if (isPlayerActive(p)) n++;
+  }
+  return n;
+}
+
+function purgeOfflinePlayers(room) {
+  for (const [id, p] of room.players) {
+    if (p.online === false) room.players.delete(id);
+  }
+}
+
+function attachSocketToRoom(socket, room, player) {
+  player.online = true;
+  room.players.set(socket.id, player);
+  socketRoom.set(socket.id, room.code);
+  socket.join(room.code);
+}
+
+function ensureRoomSettings(room) {
+  const impostors = Number(room.settings?.impostors);
+  const timerSec = Number(room.settings?.timerSec);
+  room.settings = {
+    impostors: [1, 2, 3].includes(impostors) ? impostors : 1,
+    timerSec: TIMER_OPTIONS.includes(timerSec) ? timerSec : 120,
+  };
+}
+
 function assignRoles(room) {
+  ensureRoomSettings(room);
   const ids = [...room.players.keys()];
   const maxImpostors = Math.min(room.settings.impostors, Math.max(0, ids.length - 1));
-  const shuffled = ids.sort(() => Math.random() - 0.5);
+  const shuffled = [...ids].sort(() => Math.random() - 0.5);
   for (const p of room.players.values()) {
     p.role = "innocent";
   }
@@ -221,6 +301,7 @@ function assignRoles(room) {
 
 function checkGameEnd(room) {
   if (room.gameOver) return;
+  if (room.startedAt && Date.now() - room.startedAt < 3000) return;
   const innocents = countAliveByRole(room, "innocent");
   const impostors = countAliveByRole(room, "impostor");
   const now = Date.now();
@@ -269,7 +350,7 @@ function getRoomForSocket(socketId) {
   return rooms.get(code) || null;
 }
 
-function publicPlayer(p) {
+function publicPlayer(p, now = Date.now()) {
   return {
     id: p.id,
     name: p.name,
@@ -278,29 +359,54 @@ function publicPlayer(p) {
     angle: p.angle,
     alive: p.alive,
     color: p.color,
+    hidden: p.invisibleUntil > now,
+    speedActive: p.speedUntil > now,
+    portal: p.portal ? { x: p.portal.x, y: p.portal.y } : null,
   };
 }
 
+function usePlayerPower(room, p, powerId) {
+  if (!POWER_IDS.includes(powerId)) return;
+  if (!p.powers?.[powerId] || !p.alive || p.online === false) return;
+  const now = Date.now();
+
+  if (powerId === "portal") {
+    if (!p.portal) {
+      p.portal = { x: p.x, y: p.y };
+      return;
+    }
+    const dest = pushCircleOutOfWalls(p.portal.x, p.portal.y, PLAYER_RADIUS);
+    p.x = dest.x;
+    p.y = dest.y;
+    p.vx = 0;
+    p.vy = 0;
+    return;
+  }
+
+  if (powerId === "invisible") {
+    if (now < p.powerCooldownUntil.invisible) return;
+    p.invisibleUntil = now + POWER_DURATION_MS;
+    p.powerCooldownUntil.invisible = now + POWER_COOLDOWN_MS;
+    return;
+  }
+
+  if (powerId === "speed") {
+    if (now < p.powerCooldownUntil.speed) return;
+    p.speedUntil = now + POWER_DURATION_MS;
+    p.powerCooldownUntil.speed = now + POWER_COOLDOWN_MS;
+  }
+}
+
 function broadcastLobby(room) {
-  io.to(room.code).emit("lobby", {
-    code: room.code,
-    hostId: room.hostId,
-    status: room.status,
-    settings: room.settings,
-    players: [...room.players.values()].map((p) => ({
-      id: p.id,
-      name: p.name,
-      color: p.color,
-    })),
-  });
+  io.to(room.code).emit("lobby", lobbyPayload(room));
 }
 
 function broadcastState(room) {
+  const now = Date.now();
   const players = {};
   for (const [id, p] of room.players) {
-    if (room.status === "playing") players[id] = publicPlayer(p);
+    if (room.status === "playing") players[id] = publicPlayer(p, now);
   }
-  const now = Date.now();
   const timeLeftMs = room.timerEndsAt ? Math.max(0, room.timerEndsAt - now) : 0;
 
   io.to(room.code).emit("state", {
@@ -316,7 +422,7 @@ function broadcastState(room) {
   });
 }
 
-function leaveRoom(socket) {
+function handleDisconnect(socket) {
   const code = socketRoom.get(socket.id);
   if (!code) return;
   const room = rooms.get(code);
@@ -324,13 +430,28 @@ function leaveRoom(socket) {
   socketRoom.delete(socket.id);
   if (!room) return;
 
-  room.players.delete(socket.id);
-  if (room.players.size === 0) {
-    rooms.delete(code);
+  if (room.status === "playing" && !room.gameOver) {
+    const p = room.players.get(socket.id);
+    if (p) {
+      p.online = false;
+      p.vx = 0;
+      p.vy = 0;
+      p.removeAt = Date.now() + 90000;
+    }
     return;
   }
 
-  if (room.hostId === socket.id) {
+  removePlayerFromRoom(room, socket.id);
+}
+
+function removePlayerFromRoom(room, playerId) {
+  room.players.delete(playerId);
+  if (room.players.size === 0) {
+    rooms.delete(room.code);
+    return;
+  }
+
+  if (room.hostId === playerId) {
     room.hostId = room.players.keys().next().value;
   }
   broadcastLobby(room);
@@ -340,12 +461,47 @@ function leaveRoom(socket) {
   }
 }
 
+function leaveRoom(socket) {
+  const code = socketRoom.get(socket.id);
+  if (!code) return;
+  const room = rooms.get(code);
+  socket.leave(code);
+  socketRoom.delete(socket.id);
+  if (!room) return;
+  removePlayerFromRoom(room, socket.id);
+}
+
+function tryRejoinPlayer(socket, room, name) {
+  const trimmed = (name || "Joueur").slice(0, 16);
+  for (const [playerId, p] of room.players) {
+    if (p.name !== trimmed || p.online !== false) continue;
+    room.players.delete(playerId);
+    attachSocketToRoom(socket, room, p);
+    socket.emit("joinedRoom", {
+      id: socket.id,
+      code: room.code,
+      isHost: room.hostId === socket.id,
+      lobby: lobbyPayload(room),
+    });
+    socket.emit("gameStarted", {
+      role: p.role,
+      timerSec: room.settings.timerSec,
+    });
+    broadcastState(room);
+    return true;
+  }
+  return false;
+}
+
 function startRoomGame(room) {
+  purgeOfflinePlayers(room);
+  ensureRoomSettings(room);
   room.status = "playing";
   room.gameOver = false;
   room.winner = null;
   room.endReason = null;
-  room.timerEndsAt = Date.now() + room.settings.timerSec * 1000;
+  room.startedAt = Date.now();
+  room.timerEndsAt = room.startedAt + room.settings.timerSec * 1000;
 
   for (const p of room.players.values()) {
     initGameFields(p);
@@ -374,10 +530,11 @@ function tryKill(room, killer) {
   let target = null;
   let best = KILL_RANGE;
   for (const p of room.players.values()) {
-    if (!p.alive || p.role !== "innocent" || p.id === killer.id) continue;
+    if (!isPlayerActive(p) || !p.alive || p.role !== "innocent" || p.id === killer.id) continue;
     const d = dist(killer.x, killer.y, p.x, p.y);
     if (d > KILL_RANGE) continue;
     if (!hasLineOfSight(killer.x, killer.y, p.x, p.y)) continue;
+    if (p.invisibleUntil > now) continue;
     if (d < best) {
       best = d;
       target = p;
@@ -391,8 +548,15 @@ function tryKill(room, killer) {
 }
 
 io.on("connection", (socket) => {
+  socket.on("leaveRoom", () => {
+    leaveRoom(socket);
+    socket.emit("leftRoom");
+  });
+
   socket.on("createRoom", (name) => {
-    if (socketRoom.has(socket.id)) return;
+    if (socketRoom.has(socket.id)) {
+      leaveRoom(socket);
+    }
     const code = generateRoomCode();
     if (!code) {
       socket.emit("errorMsg", { message: "Impossible de créer une salle. Réessaie." });
@@ -409,33 +573,59 @@ io.on("connection", (socket) => {
       endReason: null,
       timerEndsAt: 0,
     };
-    room.players.set(socket.id, lobbyPlayer(socket.id, name));
+    room.players.set(socket.id, lobbyPlayer(socket.id, name, room));
     rooms.set(code, room);
     socketRoom.set(socket.id, code);
     socket.join(code);
-    socket.emit("joinedRoom", { id: socket.id, code, isHost: true });
+    socket.emit("joinedRoom", {
+      id: socket.id,
+      code,
+      isHost: true,
+      lobby: lobbyPayload(room),
+    });
     broadcastLobby(room);
   });
 
   socket.on("joinRoom", ({ code, name }) => {
-    if (socketRoom.has(socket.id)) return;
-    const normalized = String(code || "").replace(/\D/g, "").slice(0, 3);
+    if (socketRoom.has(socket.id)) {
+      leaveRoom(socket);
+    }
+    const normalized = normalizeRoomCode(code);
+    if (normalized.length !== 3) {
+      socket.emit("errorMsg", { message: "Entre un code à 3 chiffres." });
+      return;
+    }
     const room = rooms.get(normalized);
     if (!room) {
       socket.emit("errorMsg", { message: "Code invalide. Vérifie les 3 chiffres." });
       return;
     }
     if (room.status !== "lobby") {
-      socket.emit("errorMsg", { message: "La partie a déjà commencé." });
+      if (tryRejoinPlayer(socket, room, name)) return;
+      socket.emit("errorMsg", {
+        message: "Partie en cours. Utilise le même pseudo pour revenir.",
+      });
       return;
     }
-    room.players.set(socket.id, lobbyPlayer(socket.id, name));
+    if (room.players.has(socket.id)) {
+      socketRoom.set(socket.id, normalized);
+      socket.join(normalized);
+      socket.emit("joinedRoom", {
+        id: socket.id,
+        code: normalized,
+        isHost: room.hostId === socket.id,
+        lobby: lobbyPayload(room),
+      });
+      return;
+    }
+    room.players.set(socket.id, lobbyPlayer(socket.id, name, room));
     socketRoom.set(socket.id, normalized);
     socket.join(normalized);
     socket.emit("joinedRoom", {
       id: socket.id,
       code: normalized,
       isHost: room.hostId === socket.id,
+      lobby: lobbyPayload(room),
     });
     broadcastLobby(room);
   });
@@ -447,6 +637,23 @@ io.on("connection", (socket) => {
     const timerSec = Number(data.timerSec);
     if ([1, 2, 3].includes(impostors)) room.settings.impostors = impostors;
     if (TIMER_OPTIONS.includes(timerSec)) room.settings.timerSec = timerSec;
+    broadcastLobby(room);
+  });
+
+  socket.on("setPowers", (powers) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "lobby") return;
+    const p = room.players.get(socket.id);
+    if (!p) return;
+    const next = defaultPowers();
+    for (const id of POWER_IDS) {
+      next[id] = Boolean(powers?.[id]);
+    }
+    if (!next.portal && !next.invisible && !next.speed) {
+      socket.emit("errorMsg", { message: "Équipe au moins un pouvoir." });
+      return;
+    }
+    p.powers = next;
     broadcastLobby(room);
   });
 
@@ -469,38 +676,70 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.hostId !== socket.id) return;
     if (room.status !== "lobby") return;
-    if (room.players.size < 2) {
-      socket.emit("errorMsg", { message: "Il faut au moins 2 joueurs pour commencer." });
+    purgeOfflinePlayers(room);
+    const online = countOnlinePlayers(room);
+    if (online < 2) {
+      socket.emit("errorMsg", { message: "Il faut au moins 2 joueurs connectés pour commencer." });
       return;
     }
-    if (room.settings.impostors >= room.players.size) {
+    if (room.settings.impostors >= online) {
       socket.emit("errorMsg", { message: "Trop d’imposteurs pour ce nombre de joueurs." });
       return;
     }
     startRoomGame(room);
   });
 
+  socket.on("syncGame", () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing") return;
+    const p = room.players.get(socket.id);
+    if (!p) return;
+    socket.emit("gameStarted", {
+      role: p.role,
+      timerSec: room.settings.timerSec,
+    });
+    broadcastState(room);
+  });
+
   socket.on("input", (data) => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.status !== "playing" || room.gameOver) return;
     const p = room.players.get(socket.id);
-    if (!p || !p.alive) return;
-    p.vx = data.vx ?? 0;
-    p.vy = data.vy ?? 0;
+    if (!p || !p.alive || p.online === false) return;
+    let vx = Number(data.vx) || 0;
+    let vy = Number(data.vy) || 0;
+    const vlen = Math.hypot(vx, vy);
+    if (vlen > 1) {
+      vx /= vlen;
+      vy /= vlen;
+    }
+    p.vx = vx;
+    p.vy = vy;
     if (typeof data.angle === "number") p.angle = data.angle;
     if (data.kill) tryKill(room, p);
   });
 
+  socket.on("usePower", (powerId) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing" || room.gameOver) return;
+    const p = room.players.get(socket.id);
+    if (!p) return;
+    usePlayerPower(room, p, powerId);
+  });
+
   socket.on("disconnect", () => {
-    leaveRoom(socket);
+    handleDisconnect(socket);
   });
 });
 
 function updatePlayers(room, dt) {
   for (const p of room.players.values()) {
-    if (!p.alive) continue;
-    const dx = p.vx * PLAYER_SPEED * dt;
-    const dy = p.vy * PLAYER_SPEED * dt;
+    if (!isPlayerActive(p) || !p.alive) continue;
+    const now = Date.now();
+    let speed = PLAYER_SPEED;
+    if (p.speedUntil > now) speed *= SPEED_BOOST_MULT;
+    const dx = p.vx * speed * dt;
+    const dy = p.vy * speed * dt;
     const moved = moveCircle(p.x, p.y, dx, dy, PLAYER_RADIUS);
     p.x = moved.x;
     p.y = moved.y;
@@ -514,6 +753,12 @@ setInterval(() => {
   last = now;
   for (const room of rooms.values()) {
     if (room.status !== "playing") continue;
+    const now = Date.now();
+    for (const [id, p] of room.players) {
+      if (p.online === false && p.removeAt && now >= p.removeAt) {
+        removePlayerFromRoom(room, id);
+      }
+    }
     updatePlayers(room, dt);
     checkGameEnd(room);
     broadcastState(room);

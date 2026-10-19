@@ -72,11 +72,16 @@
           </div>
         </div>
 
+        <h2 class="lobby-title">Pouvoirs équipés</h2>
+        <p class="tagline center small-hint">Clique pour activer ou désactiver avant la partie.</p>
+        <div id="powerPicker" class="power-picker"></div>
+
         <h2 class="lobby-title">Joueurs</h2>
         <ul id="playerList" class="player-list"></ul>
 
         <p id="lobbyStatus" class="lobby-wait">En attente de l’hôte…</p>
         <button id="startBtn" type="button" class="btn-primary hidden">Démarrer la partie</button>
+        <button id="leaveLobbyBtn" type="button" class="btn-secondary leave-lobby">Quitter la salle</button>
         <p id="lobbyError" class="error hidden"></p>
       </div>
 
@@ -109,8 +114,11 @@
       <div class="end-card">
         <h2 id="endTitle">Partie terminée</h2>
         <p id="endMessage"></p>
+        <button id="endHomeBtn" type="button" class="btn-secondary end-home-btn">Retour au menu</button>
       </div>
     </div>
+
+    <div id="powerBar" class="power-bar hidden" aria-label="Pouvoirs"></div>
 
     <button id="killBtn" type="button" class="kill-btn hidden" aria-label="Tuer">Tuer</button>
 

@@ -221,6 +221,17 @@ input:focus {
   margin-top: 1rem;
 }
 
+.leave-lobby {
+  margin-top: 0.65rem;
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+}
+
 .hud-top.hidden {
   display: none;
 }
@@ -334,7 +345,6 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  pointer-events: none;
   background: rgba(0, 0, 0, 0.35);
 }
 
@@ -355,6 +365,20 @@ select {
 .end-card p {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.end-home-btn {
+  margin-top: 1rem;
+  width: 100%;
+  pointer-events: auto;
+}
+
+.end-screen {
+  pointer-events: none;
+}
+
+.end-card {
+  pointer-events: auto;
 }
 
 #game {
@@ -398,6 +422,95 @@ select {
 
 .kill-btn.ready:active {
   transform: scale(0.98);
+}
+
+.small-hint {
+  font-size: 0.8rem;
+  margin-bottom: 0.65rem !important;
+}
+
+.power-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 1rem;
+}
+
+.power-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid #3a4558;
+  background: #10151f;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.power-toggle .power-emoji {
+  font-size: 1.35rem;
+  width: 1.75rem;
+  text-align: center;
+}
+
+.power-toggle .power-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: 1;
+}
+
+.power-toggle .power-meta strong {
+  font-size: 0.92rem;
+}
+
+.power-toggle .power-meta span {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.power-toggle.equipped {
+  border-color: #a855f7;
+  background: rgba(168, 85, 247, 0.12);
+}
+
+.power-bar {
+  position: fixed;
+  right: 16px;
+  bottom: 96px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 120px;
+}
+
+.power-btn {
+  padding: 0.55rem 0.65rem;
+  border-radius: 12px;
+  border: 1px solid #4c1d95;
+  background: linear-gradient(180deg, #5b21b6, #4c1d95);
+  color: #fff;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  line-height: 1.25;
+}
+
+.power-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.power-btn.portal-ready {
+  border-color: #22d3ee;
+  background: linear-gradient(180deg, #0891b2, #0e7490);
 }
 
 .control-choice {
