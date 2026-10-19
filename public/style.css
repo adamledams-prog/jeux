@@ -359,6 +359,7 @@ select {
 
 #game {
   cursor: default;
+  touch-action: none;
 }
 
 .kill-btn {
@@ -397,4 +398,85 @@ select {
 
 .kill-btn.ready:active {
   transform: scale(0.98);
+}
+
+.control-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 0.5rem;
+}
+
+.control-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 1rem 0.75rem;
+  border-radius: 14px;
+  border: 1px solid #3a4558;
+  background: #10151f;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.control-card:hover {
+  transform: translateY(-2px);
+  border-color: #ef4444;
+}
+
+.control-icon {
+  font-size: 1.75rem;
+}
+
+.control-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.35;
+}
+
+.joystick-zone {
+  position: fixed;
+  left: 18px;
+  bottom: 22px;
+  z-index: 12;
+  width: 140px;
+  height: 140px;
+  touch-action: none;
+  user-select: none;
+}
+
+.joystick-base {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: rgba(15, 20, 30, 0.72);
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.joystick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  margin-left: -28px;
+  margin-top: -28px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #4b5563, #1f2937);
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+}
+
+.end-card.defeat h2 {
+  color: #f87171;
+}
+
+.end-card.victory h2 {
+  color: #4ade80;
 }

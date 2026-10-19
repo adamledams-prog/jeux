@@ -3,6 +3,13 @@ const ctx = canvas.getContext("2d");
 const overlay = document.getElementById("overlay");
 const screenHome = document.getElementById("screenHome");
 const screenLobby = document.getElementById("screenLobby");
+const screenControls = document.getElementById("screenControls");
+const pickDesktop = document.getElementById("pickDesktop");
+const pickMobile = document.getElementById("pickMobile");
+const joystickZone = document.getElementById("joystickZone");
+const joystickBase = document.getElementById("joystickBase");
+const joystickKnob = document.getElementById("joystickKnob");
+const endCard = document.querySelector(".end-card");
 const hudTop = document.getElementById("hudTop");
 const endScreen = document.getElementById("endScreen");
 const endTitle = document.getElementById("endTitle");
@@ -57,6 +64,9 @@ let mouse = { x: 0, y: 0 };
 let killPressed = false;
 let camera = { x: 0, y: 0 };
 let visibility = null;
+let controlMode = null;
+const joystick = { active: false, vx: 0, vy: 0, pointerId: null };
+const JOY_RADIUS = 48;
 
 function getName() {
   return nameInput.value.trim() || "Joueur";
@@ -80,6 +90,9 @@ function showHome() {
   hudTop.classList.add("hidden");
   endScreen.classList.add("hidden");
   killBtn.classList.add("hidden");
+  joystickZone.classList.add("hidden");
+  screenControls.classList.add("hidden");
+  controlMode = null;
 }
 
 function showLobby() {
@@ -90,11 +103,32 @@ function showLobby() {
   hudTop.classList.add("hidden");
   endScreen.classList.add("hidden");
   killBtn.classList.add("hidden");
+  joystickZone.classList.add("hidden");
+  screenControls.classList.add("hidden");
+}
+
+function showControlPicker() {
+  phase = "controlPick";
+  screenHome.classList.add("hidden");
+  screenLobby.classList.add("hidden");
+  screenControls.classList.remove("hidden");
+  overlay.classList.remove("hidden");
+  hudTop.classList.add("hidden");
+  killBtn.classList.add("hidden");
+  joystickZone.classList.add("hidden");
+}
+
+function beginWithControlMode(mode) {
+  controlMode = mode;
+  screenControls.classList.add("hidden");
+  overlay.classList.add("hidden");
+  joystickZone.classList.toggle("hidden", mode !== "mobile");
+  if (mode === "mobile") resetJoystick();
+  showGame();
 }
 
 function showGame() {
   phase = "playing";
-  overlay.classList.add("hidden");
   hudTop.classList.remove("hidden");
   endScreen.classList.add("hidden");
   canvas.focus();
@@ -122,6 +156,65 @@ function buildColorPicker() {
   }
 }
 buildColorPicker();
+
+pickDesktop.addEventListener("click", () => beginWithControlMode("desktop"));
+pickMobile.addEventListener("click", () => beginWithControlMode("mobile"));
+
+function resetJoystick() {
+  joystick.active = false;
+  joystick.vx = 0;
+  joystick.vy = 0;
+  joystick.pointerId = null;
+  joystickKnob.style.transform = "translate(0px, 0px)";
+}
+
+function joystickCenter() {
+  const r = joystickBase.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function updateJoystickFromPointer(clientX, clientY) {
+  const c = joystickCenter();
+  let dx = clientX - c.x;
+  let dy = clientY - c.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > JOY_RADIUS) {
+    dx = (dx / dist) * JOY_RADIUS;
+    dy = (dy / dist) * JOY_RADIUS;
+  }
+  joystickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+  const len = Math.hypot(dx, dy);
+  if (len < 6) {
+    joystick.vx = 0;
+    joystick.vy = 0;
+  } else {
+    joystick.vx = dx / JOY_RADIUS;
+    joystick.vy = dy / JOY_RADIUS;
+  }
+}
+
+joystickBase.addEventListener("pointerdown", (e) => {
+  if (controlMode !== "mobile") return;
+  joystick.active = true;
+  joystick.pointerId = e.pointerId;
+  joystickBase.setPointerCapture(e.pointerId);
+  updateJoystickFromPointer(e.clientX, e.clientY);
+  e.preventDefault();
+});
+
+joystickBase.addEventListener("pointermove", (e) => {
+  if (!joystick.active || e.pointerId !== joystick.pointerId) return;
+  updateJoystickFromPointer(e.clientX, e.clientY);
+  e.preventDefault();
+});
+
+function endJoystick(e) {
+  if (e.pointerId !== joystick.pointerId) return;
+  resetJoystick();
+}
+
+joystickBase.addEventListener("pointerup", endJoystick);
+joystickBase.addEventListener("pointercancel", endJoystick);
 
 killBtn.addEventListener("click", () => {
   if (!killBtn.classList.contains("ready")) return;
@@ -203,20 +296,40 @@ socket.on("lobby", (data) => {
 socket.on("gameStarted", ({ role }) => {
   myRole = role;
   roleHud.textContent = role === "impostor" ? "Rôle : Imposteur" : "Rôle : Innocent";
-  showGame();
+  showControlPicker();
 });
+
+function updateEndScreen(s) {
+  if (!s.gameOver) return;
+  endScreen.classList.remove("hidden");
+  joystickZone.classList.add("hidden");
+  killBtn.classList.add("hidden");
+  endCard.classList.remove("victory", "defeat");
+
+  const innocentWin = s.winner === "innocents";
+  const impostorWin = s.winner === "impostors";
+  const iWon =
+    (innocentWin && myRole === "innocent") || (impostorWin && myRole === "impostor");
+  const iLost =
+    (impostorWin && myRole === "innocent") || (innocentWin && myRole === "impostor");
+
+  if (iLost) {
+    endTitle.textContent = "Défaite";
+    endCard.classList.add("defeat");
+  } else if (iWon) {
+    endTitle.textContent = "Victoire !";
+    endCard.classList.add("victory");
+  } else if (impostorWin) {
+    endTitle.textContent = "Victoire des imposteurs";
+  } else {
+    endTitle.textContent = "Victoire des innocents !";
+  }
+  endMessage.textContent = s.endReason || "";
+}
 
 socket.on("state", (s) => {
   state = s;
-  if (s.gameOver) {
-    endScreen.classList.remove("hidden");
-    if (s.winner === "innocents") {
-      endTitle.textContent = "Victoire des innocents !";
-    } else {
-      endTitle.textContent = "Victoire des imposteurs !";
-    }
-    endMessage.textContent = s.endReason || "";
-  }
+  updateEndScreen(s);
 });
 
 function updateLobbyUi() {
@@ -292,19 +405,33 @@ canvas.addEventListener("mousemove", (e) => {
 function getInput() {
   let vx = 0;
   let vy = 0;
-  if (keys["KeyW"] || keys["KeyZ"] || keys["ArrowUp"]) vy -= 1;
-  if (keys["KeyS"] || keys["ArrowDown"]) vy += 1;
-  if (keys["KeyA"] || keys["KeyQ"] || keys["ArrowLeft"]) vx -= 1;
-  if (keys["KeyD"] || keys["ArrowRight"]) vx += 1;
+
+  if (controlMode === "desktop") {
+    if (keys["ArrowUp"]) vy -= 1;
+    if (keys["ArrowDown"]) vy += 1;
+    if (keys["ArrowLeft"]) vx -= 1;
+    if (keys["ArrowRight"]) vx += 1;
+  } else if (controlMode === "mobile") {
+    vx = joystick.vx;
+    vy = joystick.vy;
+  } else {
+    if (keys["KeyW"] || keys["KeyZ"] || keys["ArrowUp"]) vy -= 1;
+    if (keys["KeyS"] || keys["ArrowDown"]) vy += 1;
+    if (keys["KeyA"] || keys["KeyQ"] || keys["ArrowLeft"]) vx -= 1;
+    if (keys["KeyD"] || keys["ArrowRight"]) vx += 1;
+  }
+
   const len = Math.hypot(vx, vy);
-  if (len > 0) {
+  if (len > 0 && controlMode !== "mobile") {
     vx /= len;
     vy /= len;
   }
 
   const me = state?.players?.[myId];
   let angle = me?.angle ?? 0;
-  if (me) {
+  if (len > 0.05) {
+    angle = Math.atan2(vy, vx);
+  } else if (me && controlMode === "desktop") {
     const wx = me.x - camera.x + canvas.width / 2;
     const wy = me.y - camera.y + canvas.height / 2;
     angle = Math.atan2(mouse.y - wy, mouse.x - wx);
@@ -314,7 +441,7 @@ function getInput() {
 }
 
 setInterval(() => {
-  if (!myId || phase !== "playing" || state?.gameOver) return;
+  if (!myId || phase !== "playing" || !controlMode || state?.gameOver) return;
   const input = getInput();
   socket.emit("input", input);
   if (input.kill) killPressed = false;

@@ -37,7 +37,7 @@
         <p id="homeError" class="error hidden"></p>
 
         <ul class="help">
-          <li><kbd>Z Q S D</kbd> — bouger</li>
+          <li>Ordinateur : flèches — Téléphone : joystick</li>
           <li>Imposteur : bouton <strong>Tuer</strong> quand tu es tout près</li>
           <li>Tu ne vois pas à travers les murs</li>
         </ul>
@@ -79,6 +79,23 @@
         <button id="startBtn" type="button" class="btn-primary hidden">Démarrer la partie</button>
         <p id="lobbyError" class="error hidden"></p>
       </div>
+
+      <div id="screenControls" class="panel hidden">
+        <h1>Comment tu joues ?</h1>
+        <p class="tagline center">Choisis ton type d’appareil avant d’entrer dans le labyrinthe.</p>
+        <div class="control-choice">
+          <button id="pickDesktop" type="button" class="control-card">
+            <span class="control-icon">⌨️</span>
+            <strong>Ordinateur</strong>
+            <span class="control-hint">Flèches du clavier</span>
+          </button>
+          <button id="pickMobile" type="button" class="control-card">
+            <span class="control-icon">📱</span>
+            <strong>Téléphone</strong>
+            <span class="control-hint">Joystick (style Brawl Stars)</span>
+          </button>
+        </div>
+      </div>
     </div>
 
     <header id="hudTop" class="hud-top hidden">
@@ -96,6 +113,12 @@
     </div>
 
     <button id="killBtn" type="button" class="kill-btn hidden" aria-label="Tuer">Tuer</button>
+
+    <div id="joystickZone" class="joystick-zone hidden" aria-hidden="true">
+      <div id="joystickBase" class="joystick-base">
+        <div id="joystickKnob" class="joystick-knob"></div>
+      </div>
+    </div>
 
     <canvas id="game"></canvas>
 
