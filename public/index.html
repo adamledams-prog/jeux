@@ -70,11 +70,56 @@
               <option value="180">3:00</option>
             </select>
           </div>
+          <div class="setting-row setting-row-check">
+            <label class="check-label" for="powersEnabled">
+              <input id="powersEnabled" type="checkbox" checked />
+              Activer les pouvoirs en partie
+            </label>
+          </div>
+          <div id="powerHostSettings" class="power-host-settings">
+            <p class="small-hint">Recharge de chaque pouvoir (12 à 100 secondes) :</p>
+            <div class="setting-row">
+              <label for="cooldownPortal">🌀 Portail</label>
+              <input id="cooldownPortal" type="number" min="12" max="100" value="20" />
+            </div>
+            <div class="setting-row">
+              <label for="cooldownInvisible">👻 Invisibilité</label>
+              <input id="cooldownInvisible" type="number" min="12" max="100" value="20" />
+            </div>
+            <div class="setting-row">
+              <label for="cooldownSpeed">⚡ Rapidité</label>
+              <input id="cooldownSpeed" type="number" min="12" max="100" value="20" />
+            </div>
+            <div class="setting-row">
+              <label for="cooldownVision">👁️ Vision</label>
+              <input id="cooldownVision" type="number" min="12" max="100" value="20" />
+            </div>
+            <div class="setting-row">
+              <label for="cooldownDash">💨 Dash</label>
+              <input id="cooldownDash" type="number" min="12" max="100" value="20" />
+            </div>
+            <div class="setting-row">
+              <label for="cooldownDisguise">🎭 Déguisement</label>
+              <input id="cooldownDisguise" type="number" min="12" max="100" value="20" />
+            </div>
+            <div class="setting-row">
+              <label for="cooldownFreeze">🧊 Gel</label>
+              <input id="cooldownFreeze" type="number" min="12" max="100" value="20" />
+            </div>
+          </div>
         </div>
 
-        <h2 class="lobby-title">Pouvoirs équipés</h2>
-        <p class="tagline center small-hint">Clique pour activer ou désactiver avant la partie.</p>
-        <div id="powerPicker" class="power-picker"></div>
+        <div id="powerPickerSection">
+          <h2 class="lobby-title">Pouvoirs équipés</h2>
+          <p id="powerPickerHint" class="tagline center small-hint">
+            Clique pour activer ou désactiver avant la partie.
+          </p>
+          <p id="powerDisabledMsg" class="tagline center small-hint hidden">
+            Les pouvoirs sont désactivés pour cette partie.
+          </p>
+          <p id="powerCooldownInfo" class="tagline center small-hint hidden"></p>
+          <div id="powerPicker" class="power-picker"></div>
+        </div>
 
         <h2 class="lobby-title">Joueurs</h2>
         <ul id="playerList" class="player-list"></ul>

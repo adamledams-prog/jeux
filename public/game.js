@@ -30,6 +30,12 @@ const colorPicker = document.getElementById("colorPicker");
 const hostSettings = document.getElementById("hostSettings");
 const impostorSelect = document.getElementById("impostorSelect");
 const timerSelect = document.getElementById("timerSelect");
+const powersEnabledCheck = document.getElementById("powersEnabled");
+const powerHostSettings = document.getElementById("powerHostSettings");
+const powerPickerSection = document.getElementById("powerPickerSection");
+const powerPickerHint = document.getElementById("powerPickerHint");
+const powerDisabledMsg = document.getElementById("powerDisabledMsg");
+const powerCooldownInfo = document.getElementById("powerCooldownInfo");
 const roomHud = document.getElementById("roomHud");
 const roleHud = document.getElementById("roleHud");
 const timerHud = document.getElementById("timerHud");
@@ -52,6 +58,8 @@ const COLOR_OPTIONS = [
 ];
 
 const VIEW_RADIUS = 340;
+const VIEW_RADIUS_BOOST = 130;
+const VISION_EXTRA_WALLS = 1;
 const KILL_RANGE = 52;
 
 const POWER_CATALOG = {
@@ -70,9 +78,37 @@ const POWER_CATALOG = {
     name: "Rapidité",
     hint: "Vitesse x1.4 pendant 4s",
   },
+  vision: {
+    emoji: "👁️",
+    name: "Vision",
+    hint: "Plus loin + voir à travers 1 mur (4s)",
+  },
+  dash: {
+    emoji: "💨",
+    name: "Dash",
+    hint: "Saut court devant toi (sans traverser les murs)",
+  },
+  disguise: {
+    emoji: "🎭",
+    name: "Déguisement",
+    hint: "Couleur et pseudo d’un autre joueur (4s)",
+  },
+  freeze: {
+    emoji: "🧊",
+    name: "Gel",
+    hint: "Gèle les joueurs proches 2s (pas toi)",
+  },
 };
 
-const POWER_ORDER = ["portal", "invisible", "speed"];
+const POWER_ORDER = [
+  "portal",
+  "invisible",
+  "speed",
+  "vision",
+  "dash",
+  "disguise",
+  "freeze",
+];
 
 const JOIN_WAIT_MS = 8000;
 const socket = io({ reconnection: false });
@@ -91,7 +127,15 @@ let killPressed = false;
 let camera = { x: 0, y: 0 };
 let visibility = null;
 let controlMode = null;
-let myPowers = { portal: true, invisible: true, speed: true };
+let myPowers = {
+  portal: true,
+  invisible: true,
+  speed: true,
+  vision: false,
+  dash: false,
+  disguise: false,
+  freeze: false,
+};
 const joystick = { active: false, vx: 0, vy: 0, pointerId: null };
 const JOY_RADIUS = 48;
 
@@ -137,6 +181,53 @@ function resetSession() {
   endCard.classList.remove("victory", "defeat");
 }
 
+function powersEnabledInLobby() {
+  return lobbyData?.settings?.powersEnabled !== false;
+}
+
+function powersFromServer(powers) {
+  const next = {};
+  for (const id of POWER_ORDER) {
+    next[id] = Boolean(powers?.[id]);
+  }
+  return next;
+}
+
+function syncHostPowerSettingsUi() {
+  const s = lobbyData?.settings;
+  if (!s) return;
+  const enabled = s.powersEnabled !== false;
+  powersEnabledCheck.checked = enabled;
+  powerHostSettings.classList.toggle("disabled", !enabled);
+  const cds = s.powerCooldownSec || {};
+  for (const id of POWER_ORDER) {
+    const el = document.getElementById(`cooldown${id.charAt(0).toUpperCase() + id.slice(1)}`);
+    if (el) el.value = String(cds[id] ?? 20);
+  }
+}
+
+function updatePowerLobbySection() {
+  const enabled = powersEnabledInLobby();
+  const cds = lobbyData?.settings?.powerCooldownSec;
+  powerPickerSection.classList.toggle("disabled", !enabled);
+  powerPickerHint.classList.toggle("hidden", !enabled);
+  powerDisabledMsg.classList.toggle("hidden", enabled);
+  if (!enabled) {
+    powerCooldownInfo.classList.add("hidden");
+    return;
+  }
+  if (!isHost && cds) {
+    const parts = POWER_ORDER.map((id) => {
+      const def = POWER_CATALOG[id];
+      return `${def.name.toLowerCase()} ${cds[id] ?? 20}s`;
+    });
+    powerCooldownInfo.textContent = `Recharge : ${parts.join(" · ")}`;
+    powerCooldownInfo.classList.remove("hidden");
+  } else {
+    powerCooldownInfo.classList.add("hidden");
+  }
+}
+
 function applyLobbyData(data) {
   if (!data) return;
   lobbyData = data;
@@ -144,14 +235,18 @@ function applyLobbyData(data) {
   if (data.settings) {
     impostorSelect.value = String(data.settings.impostors);
     timerSelect.value = String(data.settings.timerSec);
+    if (isHost) syncHostPowerSettingsUi();
   }
   const me = data.players.find((p) => p.id === myId);
   if (me) {
     myColor = me.color;
-    if (me.powers) myPowers = { ...me.powers };
+    if (me.powers) {
+      myPowers = powersFromServer(me.powers);
+    }
   }
   updateLobbyUi();
   updatePowerPickerUi();
+  updatePowerLobbySection();
 }
 
 function showHome() {
@@ -264,6 +359,7 @@ function buildPowerPicker() {
         <span>${def.hint}</span>
       </span>`;
     btn.addEventListener("click", () => {
+      if (!powersEnabledInLobby()) return;
       const next = { ...myPowers, [id]: !myPowers[id] };
       const count = POWER_ORDER.filter((k) => next[k]).length;
       if (count === 0) return;
@@ -278,6 +374,8 @@ buildPowerPicker();
 
 function buildPowerBar() {
   powerBar.innerHTML = "";
+  if (state?.powerSettings && state.powerSettings.enabled === false) return;
+  if (lobbyData?.settings?.powersEnabled === false) return;
   for (const id of POWER_ORDER) {
     if (!myPowers[id]) continue;
     const def = POWER_CATALOG[id];
@@ -287,7 +385,8 @@ function buildPowerBar() {
     btn.dataset.power = id;
     btn.textContent = `${def.emoji} ${def.name}`;
     btn.addEventListener("click", () => {
-      if (phase !== "playing" || state?.gameOver) return;
+      const me = state?.players?.[myId];
+      if (phase !== "playing" || state?.gameOver || !me?.alive || me.frozen) return;
       socket.emit("usePower", id);
     });
     powerBar.appendChild(btn);
@@ -295,7 +394,9 @@ function buildPowerBar() {
 }
 
 function updatePowerBarUi(me) {
-  const show = phase === "playing" && controlMode && me?.alive && !state?.gameOver;
+  const powersOn = state?.powerSettings?.enabled !== false;
+  const show =
+    powersOn && phase === "playing" && controlMode && me?.alive && !state?.gameOver;
   powerBar.classList.toggle("hidden", !show || powerBar.children.length === 0);
   if (!show) return;
   for (const btn of powerBar.children) {
@@ -436,16 +537,40 @@ startBtn.addEventListener("click", () => {
   socket.emit("startGame");
 });
 
+function clampCooldownInput(input) {
+  let v = Math.round(Number(input.value));
+  if (!Number.isFinite(v)) v = 20;
+  v = Math.min(100, Math.max(12, v));
+  input.value = String(v);
+  return v;
+}
+
 function emitSettings() {
   if (!isHost) return;
   socket.emit("updateSettings", {
     impostors: Number(impostorSelect.value),
     timerSec: Number(timerSelect.value),
+    powersEnabled: powersEnabledCheck.checked,
+    powerCooldownSec: POWER_ORDER.reduce((acc, id) => {
+      const el = document.getElementById(`cooldown${id.charAt(0).toUpperCase() + id.slice(1)}`);
+      if (el) acc[id] = clampCooldownInput(el);
+      return acc;
+    }, {}),
   });
 }
 
 impostorSelect.addEventListener("change", emitSettings);
 timerSelect.addEventListener("change", emitSettings);
+powersEnabledCheck.addEventListener("change", () => {
+  powerHostSettings.classList.toggle("disabled", !powersEnabledCheck.checked);
+  emitSettings();
+});
+for (const id of POWER_ORDER) {
+  const input = document.getElementById(`cooldown${id.charAt(0).toUpperCase() + id.slice(1)}`);
+  if (!input) continue;
+  input.addEventListener("change", emitSettings);
+  input.addEventListener("blur", emitSettings);
+}
 
 socket.on("errorMsg", ({ message }) => {
   clearJoinPending();
@@ -534,7 +659,7 @@ function updateEndScreen(s) {
 socket.on("state", (s) => {
   if (phase === "home" || phase === "lobby") return;
   if (phase === "controlPick") {
-    if (!s.gameOver) state = s;
+    state = s;
     return;
   }
   state = s;
@@ -652,7 +777,13 @@ function getInput() {
     angle = Math.atan2(mouse.y - wy, mouse.x - wx);
   }
 
-  return { vx, vy, angle, kill: killPressed };
+  const canKill =
+    killPressed &&
+    myRole === "impostor" &&
+    me?.alive &&
+    !me?.frozen &&
+    !state?.gameOver;
+  return { vx, vy, angle, kill: canKill };
 }
 
 setInterval(() => {
@@ -667,30 +798,53 @@ function tileBlocksSight(maze, tx, ty) {
   return maze[ty][tx] === 1;
 }
 
-function hasLineOfSight(x0, y0, x1, y1, maze, tile) {
-  const steps = Math.max(2, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (tile / 2)));
+function wallSegmentsOnLine(x0, y0, x1, y1, maze, tile) {
+  const steps = Math.max(2, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (tile / 4)));
+  let segments = 0;
+  let insideWall = false;
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
     const x = x0 + (x1 - x0) * t;
     const y = y0 + (y1 - y0) * t;
     const tx = Math.floor(x / tile);
     const ty = Math.floor(y / tile);
-    if (tileBlocksSight(maze, tx, ty)) return false;
+    const wall = tileBlocksSight(maze, tx, ty);
+    if (wall && !insideWall) {
+      segments++;
+      insideWall = true;
+    } else if (!wall) {
+      insideWall = false;
+    }
   }
-  return true;
+  return segments;
 }
 
-function computeVisibility(map, px, py) {
+function hasLineOfSight(x0, y0, x1, y1, maze, tile, maxWallSegments = 0) {
+  return wallSegmentsOnLine(x0, y0, x1, y1, maze, tile) <= maxWallSegments;
+}
+
+function myViewRadius(me) {
+  if (me?.visionActive) return VIEW_RADIUS + VIEW_RADIUS_BOOST;
+  return VIEW_RADIUS;
+}
+
+function myMaxWallSegments(me) {
+  return me?.visionActive ? VISION_EXTRA_WALLS : 0;
+}
+
+function computeVisibility(map, px, py, me) {
   const { maze, tile, w, h } = map;
+  const radius = myViewRadius(me);
+  const maxWalls = myMaxWallSegments(me);
   const vis = [];
   for (let ty = 0; ty < h; ty++) {
     vis[ty] = [];
     for (let tx = 0; tx < w; tx++) {
       const cx = tx * tile + tile / 2;
       const cy = ty * tile + tile / 2;
-      const inRange = Math.hypot(cx - px, cy - py) <= VIEW_RADIUS + tile;
+      const inRange = Math.hypot(cx - px, cy - py) <= radius + tile;
       vis[ty][tx] =
-        inRange && hasLineOfSight(px, py, cx, cy, maze, tile);
+        inRange && hasLineOfSight(px, py, cx, cy, maze, tile, maxWalls);
     }
   }
   return vis;
@@ -698,12 +852,14 @@ function computeVisibility(map, px, py) {
 
 function canSeePlayer(me, other, maze, tile) {
   if (other.hidden && other.id !== myId) return false;
+  const radius = myViewRadius(me);
+  const maxWalls = myMaxWallSegments(me);
   if (!other.alive) {
-    return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile);
+    return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile, maxWalls);
   }
   const d = Math.hypot(other.x - me.x, other.y - me.y);
-  if (d > VIEW_RADIUS) return false;
-  return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile);
+  if (d > radius) return false;
+  return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile, maxWalls);
 }
 
 function drawTile(x, y, tile, isWall, visible, tx, ty) {
@@ -735,13 +891,13 @@ function drawTile(x, y, tile, isWall, visible, tx, ty) {
   }
 }
 
-function drawPlayerGlow(px, py) {
-  const glow = ctx.createRadialGradient(px, py, 8, px, py, VIEW_RADIUS * 0.85);
+function drawPlayerGlow(px, py, radius) {
+  const glow = ctx.createRadialGradient(px, py, 8, px, py, radius * 0.85);
   glow.addColorStop(0, "rgba(120, 170, 255, 0.22)");
   glow.addColorStop(0.45, "rgba(80, 120, 200, 0.08)");
   glow.addColorStop(1, "rgba(0, 0, 0, 0)");
   ctx.fillStyle = glow;
-  ctx.fillRect(px - VIEW_RADIUS, py - VIEW_RADIUS, VIEW_RADIUS * 2, VIEW_RADIUS * 2);
+  ctx.fillRect(px - radius, py - radius, radius * 2, radius * 2);
 }
 
 function drawMaze(map, vis) {
@@ -782,6 +938,16 @@ function drawPortal(portal) {
   ctx.restore();
 }
 
+function playerDrawColor(p, isMe) {
+  if (isMe) return p.color || "#ef4444";
+  return p.appearanceColor || p.color || "#ef4444";
+}
+
+function playerDrawName(p, isMe) {
+  if (isMe) return p.name || "Joueur";
+  return p.appearanceName || p.name || "Joueur";
+}
+
 function drawPlayerCube(p, isMe, dead) {
   const size = 26;
   ctx.save();
@@ -792,12 +958,14 @@ function drawPlayerCube(p, isMe, dead) {
     ctx.globalAlpha = 0.45;
   } else if (p.hidden && isMe) {
     ctx.globalAlpha = 0.35;
+  } else if (p.frozen) {
+    ctx.globalAlpha = 0.88;
   }
 
   ctx.fillStyle = "rgba(0,0,0,0.35)";
   ctx.fillRect(-size / 2 + 2, size / 2 - 2, size - 4, 6);
 
-  ctx.fillStyle = p.color || "#ef4444";
+  ctx.fillStyle = playerDrawColor(p, isMe);
   ctx.fillRect(-size / 2, -size / 2, size, size);
   ctx.strokeStyle = isMe ? "#ffffff" : "rgba(255,255,255,0.55)";
   ctx.lineWidth = isMe ? 3 : 2;
@@ -812,15 +980,20 @@ function drawPlayerCube(p, isMe, dead) {
     ctx.fillStyle = "#e2e8f0";
     ctx.font = "600 11px Space Grotesk, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(p.name, p.x, p.y - 22);
+    ctx.fillText(playerDrawName(p, isMe), p.x, p.y - 22);
+    if (p.frozen) {
+      ctx.fillStyle = "#7dd3fc";
+      ctx.font = "600 9px Space Grotesk, sans-serif";
+      ctx.fillText("GELÉ", p.x, p.y + 28);
+    }
   }
 }
 
 function canKillNearby(me) {
-  if (!me?.alive || !state?.map) return false;
+  if (!me?.alive || me.frozen || !state?.map) return false;
   const { maze, tile } = state.map;
   for (const p of Object.values(state.players)) {
-    if (!p.alive || p.id === myId) continue;
+    if (!p.alive || p.id === myId || p.hidden) continue;
     if (Math.hypot(p.x - me.x, p.y - me.y) > KILL_RANGE) continue;
     if (hasLineOfSight(me.x, me.y, p.x, p.y, maze, tile)) return true;
   }
@@ -862,15 +1035,17 @@ function render() {
   if (me) {
     camera.x = me.x;
     camera.y = me.y;
-    visibility = computeVisibility(state.map, me.x, me.y);
+    visibility = computeVisibility(state.map, me.x, me.y, me);
   }
+
+  const viewR = me ? myViewRadius(me) : VIEW_RADIUS;
 
   ctx.save();
   ctx.translate(canvas.width / 2 - camera.x, canvas.height / 2 - camera.y);
 
   if (visibility) {
     drawMaze(state.map, visibility);
-    if (me) drawPlayerGlow(me.x, me.y);
+    if (me) drawPlayerGlow(me.x, me.y, viewR);
   }
 
   for (const p of Object.values(state.players)) {
@@ -896,6 +1071,13 @@ function render() {
   }
 
   ctx.restore();
+
+  if (me && me.frozen && me.alive) {
+    ctx.fillStyle = "rgba(125, 211, 252, 0.12)";
+    ctx.font = "600 14px Space Grotesk";
+    ctx.textAlign = "center";
+    ctx.fillText("Tu es gelé !", canvas.width / 2, canvas.height - 48);
+  }
 
   if (me && !me.alive) {
     ctx.fillStyle = "rgba(0,0,0,0.55)";
