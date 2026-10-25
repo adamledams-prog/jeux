@@ -117,9 +117,12 @@ function isOnlineHosted() {
 
 const JOIN_WAIT_MS = isOnlineHosted() ? 35000 : 10000;
 
+const RENDER_SOCKET_FALLBACK = "https://jeux-iug4.onrender.com";
+
 function socketServerUrl() {
   const u = window.__SOCKET_URL__;
   if (typeof u === "string" && u.length > 0) return u;
+  if (isOnlineHosted()) return RENDER_SOCKET_FALLBACK;
   return undefined;
 }
 
