@@ -115,29 +115,157 @@ function isOnlineHosted() {
   return h !== "localhost" && h !== "127.0.0.1";
 }
 
-const JOIN_WAIT_MS = isOnlineHosted() ? 25000 : 8000;
+const JOIN_WAIT_MS = isOnlineHosted() ? 35000 : 10000;
 
-const socket = io({
-  reconnection: isOnlineHosted(),
-  reconnectionAttempts: 15,
-  reconnectionDelay: 1500,
-  timeout: 25000,
+function socketServerUrl() {
+  const u = window.__SOCKET_URL__;
+  if (typeof u === "string" && u.length > 0) return u;
+  return undefined;
+}
+
+const socket = io(socketServerUrl(), {
+  reconnection: true,
+  reconnectionAttempts: 20,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  timeout: 30000,
+  transports: isOnlineHosted() ? ["polling", "websocket"] : ["websocket", "polling"],
 });
 
 function connectionHelpMessage() {
+  if (isOnlineHosted() && !socketServerUrl()) {
+    return "Le serveur multijoueur n’est pas configuré (SOCKET_SERVER_URL sur Vercel). Demande à l’hôte du projet de le configurer.";
+  }
   if (isOnlineHosted()) {
-    return "Connexion impossible pour l’instant. Sur Vercel le serveur peut mettre 10–20 s à démarrer : recharge la page puis réessaie.";
+    return "Connexion impossible. Attends quelques secondes et réessaie, ou recharge la page.";
   }
   return "Pas de connexion au serveur. Lance npm start puis réessaie.";
 }
 
 function joinTimeoutMessage() {
   if (isOnlineHosted()) {
-    return "Pas de réponse (serveur en ligne lent ou en veille). Recharge https://jeux-tawny.vercel.app et réessaie.";
+    return "Pas de réponse du serveur. Réessaie une fois — la connexion peut prendre un peu de temps.";
   }
   return "Le serveur ne répond pas. Vérifie qu’il est lancé (npm start).";
 }
+
 let joinPending = null;
+let joinRetryTimer = null;
+let joinRetryCount = 0;
+let pendingAction = null;
+let lastJoinPayload = null;
+let disconnectGrace = null;
+let powerClickLock = false;
+let powerToastUntil = 0;
+
+const POWER_FAIL_MSG = {
+  cooldown: "Pouvoir en recharge.",
+  frozen: "Tu es gelé.",
+  not_equipped: "Pouvoir non équipé.",
+  disabled: "Pouvoirs désactivés.",
+  no_target: "Personne à copier pour le déguisement.",
+  no_move: "Dash bloqué (mur ou pas de place).",
+  bad_place: "Impossible de poser le portail ici.",
+  spam: "Trop vite — attends un instant.",
+};
+
+function clearJoinRetry() {
+  if (joinRetryTimer) {
+    clearTimeout(joinRetryTimer);
+    joinRetryTimer = null;
+  }
+  joinRetryCount = 0;
+  pendingAction = null;
+}
+
+function waitForSocket(maxMs) {
+  return new Promise((resolve, reject) => {
+    if (socket.connected) {
+      resolve();
+      return;
+    }
+    const start = Date.now();
+    const onConnect = () => {
+      cleanup();
+      resolve();
+    };
+    const onConnectError = () => {
+      if (!socket.active) socket.connect();
+    };
+    const poll = setInterval(() => {
+      if (socket.connected) {
+        cleanup();
+        resolve();
+      } else if (Date.now() - start > maxMs) {
+        cleanup();
+        reject(new Error("timeout"));
+      } else if (!socket.active) {
+        socket.connect();
+      }
+    }, 400);
+
+    function cleanup() {
+      socket.off("connect", onConnect);
+      socket.off("connect_error", onConnectError);
+      clearInterval(poll);
+    }
+
+    socket.on("connect", onConnect);
+    socket.on("connect_error", onConnectError);
+    socket.connect();
+  });
+}
+
+async function runLobbyAction(action, kind, joinPayload) {
+  hideErrors();
+  clearJoinRetry();
+  pendingAction = kind;
+  lastJoinPayload = joinPayload || null;
+  setHomeButtonsDisabled(true);
+  if (isOnlineHosted()) {
+    homeError.textContent = "Connexion au serveur multijoueur…";
+    homeError.classList.remove("hidden");
+  }
+  try {
+    await waitForSocket(isOnlineHosted() ? 32000 : 12000);
+    homeError.classList.add("hidden");
+    beginJoinAttempt();
+    action();
+  } catch {
+    setHomeButtonsDisabled(false);
+    pendingAction = null;
+    showError(homeError, connectionHelpMessage());
+  }
+}
+
+function scheduleJoinRetry(message) {
+  if (!isOnlineHosted() || !pendingAction || joinRetryCount >= 8) return false;
+  const retryable =
+    message.includes("Code invalide") ||
+    message.includes("introuvable") ||
+    message.includes("Impossible de créer") ||
+    message.includes("Réessaie") ||
+    message.includes("Synchronisation");
+  if (!retryable) return false;
+
+  joinRetryCount += 1;
+  clearJoinPending();
+  setHomeButtonsDisabled(true);
+  showError(
+    homeError,
+    `Synchronisation… nouvelle tentative (${joinRetryCount}/8). Garde le même code.`
+  );
+  joinRetryTimer = setTimeout(() => {
+    joinRetryTimer = null;
+    beginJoinAttempt();
+    if (pendingAction === "create") {
+      socket.emit("createRoom", getName());
+    } else if (pendingAction === "join" && lastJoinPayload) {
+      socket.emit("joinRoom", lastJoinPayload);
+    }
+  }, 1500 + joinRetryCount * 600);
+  return true;
+}
 let myId = null;
 let isHost = false;
 let roomCode = null;
@@ -188,11 +316,14 @@ function clearJoinPending() {
     clearTimeout(joinPending);
     joinPending = null;
   }
-  setHomeButtonsDisabled(false);
+  if (!joinRetryTimer) {
+    setHomeButtonsDisabled(false);
+  }
 }
 
 function resetSession() {
   clearJoinPending();
+  clearJoinRetry();
   myId = socket.id;
   isHost = false;
   roomCode = null;
@@ -397,6 +528,20 @@ function buildPowerPicker() {
 }
 buildPowerPicker();
 
+function emitUsePower(id) {
+  const me = state?.players?.[myId];
+  if (phase !== "playing" || state?.gameOver || !me?.alive || me.frozen || powerClickLock) {
+    return;
+  }
+  const cd = me.powerCooldownMs?.[id] || 0;
+  if (cd > 0) return;
+  powerClickLock = true;
+  socket.emit("usePower", id);
+  setTimeout(() => {
+    powerClickLock = false;
+  }, 200);
+}
+
 function buildPowerBar() {
   powerBar.innerHTML = "";
   if (state?.powerSettings && state.powerSettings.enabled === false) return;
@@ -409,28 +554,39 @@ function buildPowerBar() {
     btn.className = "power-btn";
     btn.dataset.power = id;
     btn.textContent = `${def.emoji} ${def.name}`;
-    btn.addEventListener("click", () => {
-      const me = state?.players?.[myId];
-      if (phase !== "playing" || state?.gameOver || !me?.alive || me.frozen) return;
-      socket.emit("usePower", id);
-    });
+    btn.addEventListener("click", () => emitUsePower(id));
     powerBar.appendChild(btn);
   }
+}
+
+function powerBtnLabel(id, me) {
+  const def = POWER_CATALOG[id];
+  const cdMs = me?.powerCooldownMs?.[id] || 0;
+  const cdSec = Math.ceil(cdMs / 1000);
+  if (cdSec > 0) return `${def.emoji} ${cdSec}s`;
+  if (id === "portal") {
+    return me.portal ? "🌀 Téléporter" : "🌀 Poser portail";
+  }
+  return `${def.emoji} ${def.name}`;
 }
 
 function updatePowerBarUi(me) {
   const powersOn = state?.powerSettings?.enabled !== false;
   const show =
     powersOn && phase === "playing" && controlMode && me?.alive && !state?.gameOver;
+  if (show && powerBar.children.length === 0) {
+    buildPowerBar();
+  }
   powerBar.classList.toggle("hidden", !show || powerBar.children.length === 0);
-  if (!show) return;
+  if (!show || !me) return;
   for (const btn of powerBar.children) {
     const id = btn.dataset.power;
-    if (id === "portal") {
-      const hasPortal = Boolean(me.portal);
-      btn.classList.toggle("portal-ready", hasPortal);
-      btn.textContent = hasPortal ? "🌀 Téléporter" : "🌀 Poser portail";
-    }
+    const cdMs = me.powerCooldownMs?.[id] || 0;
+    const onCooldown = cdMs > 0;
+    btn.disabled = onCooldown || me.frozen || powerClickLock;
+    btn.classList.toggle("on-cooldown", onCooldown);
+    btn.classList.toggle("portal-ready", id === "portal" && Boolean(me.portal));
+    btn.textContent = powerBtnLabel(id, me);
   }
 }
 
@@ -525,28 +681,17 @@ function beginJoinAttempt() {
 }
 
 createBtn.addEventListener("click", () => {
-  hideErrors();
-  if (!socket.connected) {
-    showError(homeError, connectionHelpMessage());
-    return;
-  }
-  beginJoinAttempt();
-  socket.emit("createRoom", getName());
+  runLobbyAction(() => socket.emit("createRoom", getName()), "create");
 });
 
 joinBtn.addEventListener("click", () => {
-  hideErrors();
-  if (!socket.connected) {
-    showError(homeError, connectionHelpMessage());
-    return;
-  }
   const code = roomCodeInput.value.trim();
   if (code.length < 1) {
     showError(homeError, "Entre le code à 3 chiffres.");
     return;
   }
-  beginJoinAttempt();
-  socket.emit("joinRoom", { code, name: getName() });
+  const payload = { code, name: getName() };
+  runLobbyAction(() => socket.emit("joinRoom", payload), "join", payload);
 });
 
 leaveLobbyBtn.addEventListener("click", () => {
@@ -598,13 +743,16 @@ for (const id of POWER_ORDER) {
 }
 
 socket.on("errorMsg", ({ message }) => {
+  if (phase === "home" && scheduleJoinRetry(message)) return;
   clearJoinPending();
+  clearJoinRetry();
   if (phase === "home") showError(homeError, message);
   else showError(lobbyError, message);
 });
 
 socket.on("joinedRoom", ({ id, code, isHost: host, lobby }) => {
   clearJoinPending();
+  clearJoinRetry();
   myId = id;
   roomCode = code;
   isHost = host;
@@ -643,13 +791,49 @@ socket.on("gameStarted", ({ role }) => {
   showControlPicker();
 });
 
+function tryResumeSession() {
+  const name = getName();
+  if (phase === "lobby" && roomCode) {
+    socket.emit("joinRoom", { code: roomCode, name });
+    return;
+  }
+  if ((phase === "playing" || phase === "controlPick") && roomCode) {
+    socket.emit("joinRoom", { code: roomCode, name });
+    socket.emit("syncGame");
+  }
+}
+
+socket.on("connect", () => {
+  if (disconnectGrace) {
+    clearTimeout(disconnectGrace);
+    disconnectGrace = null;
+  }
+  if (phase !== "home" && roomCode) {
+    tryResumeSession();
+  }
+});
+
+socket.on("powerUsed", ({ powerId, ok, reason, action, frozenCount }) => {
+  powerClickLock = false;
+  if (ok) return;
+  const msg = POWER_FAIL_MSG[reason] || "Pouvoir impossible pour l’instant.";
+  powerToastUntil = Date.now() + 2200;
+  if (phase === "playing") {
+    timerHud.dataset.powerHint = msg;
+  }
+});
+
 socket.on("disconnect", () => {
   clearJoinPending();
-  if (phase !== "home") {
+  if (phase === "home") return;
+  if (disconnectGrace) clearTimeout(disconnectGrace);
+  disconnectGrace = setTimeout(() => {
+    disconnectGrace = null;
+    if (socket.connected) return;
     showError(homeError, "Connexion perdue. Recharge la page pour rejouer.");
     resetSession();
     showHome();
-  }
+  }, 18000);
 });
 
 function updateEndScreen(s) {
@@ -688,6 +872,9 @@ socket.on("state", (s) => {
     return;
   }
   state = s;
+  if (s.players?.[myId] && phase === "playing" && powerBar.children.length === 0) {
+    buildPowerBar();
+  }
   updateEndScreen(s);
 });
 
@@ -1041,7 +1228,13 @@ function updateKillButton(me) {
 
 function updateHud() {
   if (phase !== "playing" || !state || !myId) return;
-  timerHud.textContent = `Temps ${formatTime(state.timeLeftMs || 0)}`;
+  const hint = timerHud.dataset.powerHint;
+  if (hint && Date.now() < powerToastUntil) {
+    timerHud.textContent = hint;
+  } else {
+    delete timerHud.dataset.powerHint;
+    timerHud.textContent = `Temps ${formatTime(state.timeLeftMs || 0)}`;
+  }
   aliveHud.textContent = `Innocents vivants : ${state.innocentsAlive ?? "—"}`;
   updateKillButton(state.players[myId]);
   updatePowerBarUi(state.players[myId]);

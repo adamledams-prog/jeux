@@ -542,6 +542,10 @@ select {
   line-height: 1.25;
 }
 
+.power-btn.on-cooldown {
+  opacity: 0.55;
+}
+
 .power-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;

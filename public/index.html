@@ -37,7 +37,7 @@
         <p id="homeError" class="error hidden"></p>
 
         <ul class="help">
-          <li>Joue en ligne sur <strong>jeux-tawny.vercel.app</strong> (pas besoin de npm start)</li>
+          <li>Joue sur <strong>jeux-tawny.vercel.app</strong> — deux « Joueur » sans pseudo : OK (renommés auto)</li>
           <li>Ordinateur : flèches — Téléphone : joystick</li>
           <li>Imposteur : bouton <strong>Tuer</strong> quand tu es tout près</li>
           <li>Tu ne vois pas à travers les murs</li>
@@ -176,7 +176,8 @@
 
     <canvas id="game"></canvas>
 
-    <script src="/socket.io/socket.io.js"></script>
+    <script src="/runtime-config.js"></script>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
     <script src="game.js"></script>
   </body>
 </html>

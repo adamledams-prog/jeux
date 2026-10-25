@@ -19,6 +19,9 @@ const SPEED_BOOST_MULT = 1.4;
 const DASH_DISTANCE = 78;
 const FREEZE_RADIUS = 112;
 const FREEZE_DURATION_MS = 2000;
+const POWER_USE_MIN_INTERVAL_MS = 150;
+const DASH_MIN_MOVE_PX = 6;
+const LOBBY_ROOM_MAX_AGE_MS = 45 * 60 * 1000;
 const POWER_IDS = [
   "portal",
   "invisible",
@@ -273,10 +276,26 @@ function pickFreeColor(room) {
   return COLOR_OPTIONS[Math.floor(Math.random() * COLOR_OPTIONS.length)];
 }
 
+function uniqueNameInRoom(room, requested) {
+  const base = (requested || "Joueur").slice(0, 16).trim() || "Joueur";
+  const taken = new Set(
+    [...room.players.values()]
+      .filter((p) => p.online !== false)
+      .map((p) => p.name)
+  );
+  if (!taken.has(base)) return base;
+  for (let n = 2; n <= 99; n++) {
+    const suffix = String(n);
+    const candidate = `${base.slice(0, Math.max(1, 16 - suffix.length))}${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `J${Math.floor(Math.random() * 8999) + 1000}`;
+}
+
 function lobbyPlayer(id, name, room) {
   return {
     id,
-    name: (name || "Joueur").slice(0, 16),
+    name: uniqueNameInRoom(room, name),
     color: pickFreeColor(room),
     powers: defaultPowers(),
   };
@@ -444,13 +463,44 @@ function checkGameEnd(room) {
   }
 }
 
+const ALLOWED_ORIGINS = [
+  "https://jeux-tawny.vercel.app",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  try {
+    const { hostname } = new URL(origin);
+    if (hostname.endsWith(".vercel.app")) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  cors: {
+    origin: (origin, cb) => {
+      cb(null, isAllowedOrigin(origin));
+    },
+    credentials: true,
+  },
+  pingInterval: 20000,
+  pingTimeout: 25000,
+});
 
 app.use(express.static(path.join(__dirname, "public")));
 
 const rooms = new Map();
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, rooms: rooms.size });
+});
 const socketRoom = new Map();
 
 function generateRoomCode() {
@@ -467,7 +517,28 @@ function getRoomForSocket(socketId) {
   return rooms.get(code) || null;
 }
 
+function expireTimedBuffs(p, now) {
+  if (p.disguiseUntil > 0 && p.disguiseUntil <= now) {
+    p.disguiseUntil = 0;
+    p.disguiseName = null;
+    p.disguiseColor = null;
+  }
+}
+
+function powerCooldownLeftMs(p, powerId, now) {
+  return Math.max(0, (p.powerCooldownUntil?.[powerId] || 0) - now);
+}
+
+function buildPowerCooldownMap(p, now) {
+  const map = {};
+  for (const id of POWER_IDS) {
+    map[id] = powerCooldownLeftMs(p, id, now);
+  }
+  return map;
+}
+
 function publicPlayer(p, now = Date.now()) {
+  expireTimedBuffs(p, now);
   const disguised = p.disguiseUntil > now && p.disguiseName && p.disguiseColor;
   return {
     id: p.id,
@@ -485,28 +556,42 @@ function publicPlayer(p, now = Date.now()) {
     visionActive: p.visionUntil > now,
     frozen: p.frozenUntil > now,
     portal: p.portal ? { x: p.portal.x, y: p.portal.y } : null,
+    powerCooldownMs: buildPowerCooldownMap(p, now),
   };
 }
 
-function usePlayerPower(room, p, powerId) {
-  if (typeof powerId !== "string" || !POWER_IDS.includes(powerId)) return;
-  ensureRoomSettings(room);
-  if (!room.settings.powersEnabled) return;
-  if (!p.alive || p.online === false) return;
-  p.powers = mergePowers(p.powers);
-  if (!p.powers[powerId]) return;
-  const now = Date.now();
-  if (p.frozenUntil > now) return;
-  if (!p.powerCooldownUntil) p.powerCooldownUntil = emptyPowerCooldowns();
-  if (now < (p.powerCooldownUntil[powerId] || 0)) return;
-
+function applyPowerCooldown(p, powerId, now, room) {
   const cooldownMs = getPowerCooldownMs(room, powerId);
+  p.powerCooldownUntil[powerId] = now + cooldownMs;
+  p.lastPowerAt = now;
+}
+
+function usePlayerPower(room, p, powerId) {
+  if (typeof powerId !== "string" || !POWER_IDS.includes(powerId)) {
+    return { ok: false, reason: "invalid" };
+  }
+  ensureRoomSettings(room);
+  if (!room.settings.powersEnabled) return { ok: false, reason: "disabled" };
+  if (!p.alive || p.online === false) return { ok: false, reason: "dead" };
+  p.powers = mergePowers(p.powers);
+  if (!p.powers[powerId]) return { ok: false, reason: "not_equipped" };
+  const now = Date.now();
+  expireTimedBuffs(p, now);
+  if (p.frozenUntil > now) return { ok: false, reason: "frozen" };
+  if (!p.powerCooldownUntil) p.powerCooldownUntil = emptyPowerCooldowns();
+  if (now < (p.powerCooldownUntil[powerId] || 0)) return { ok: false, reason: "cooldown" };
+  if (now - (p.lastPowerAt || 0) < POWER_USE_MIN_INTERVAL_MS) {
+    return { ok: false, reason: "spam" };
+  }
 
   if (powerId === "portal") {
     if (!p.portal) {
+      if (circleOverlapsWall(p.x, p.y, PLAYER_RADIUS)) {
+        return { ok: false, reason: "bad_place" };
+      }
       p.portal = { x: p.x, y: p.y };
-      p.powerCooldownUntil.portal = now + cooldownMs;
-      return;
+      applyPowerCooldown(p, powerId, now, room);
+      return { ok: true, powerId, action: "place" };
     }
     const dest = pushCircleOutOfWalls(p.portal.x, p.portal.y, PLAYER_RADIUS);
     p.x = dest.x;
@@ -514,54 +599,82 @@ function usePlayerPower(room, p, powerId) {
     p.vx = 0;
     p.vy = 0;
     p.portal = null;
-    p.powerCooldownUntil.portal = now + cooldownMs;
-    return;
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId, action: "teleport" };
   }
 
   if (powerId === "invisible") {
     p.invisibleUntil = now + POWER_DURATION_MS;
-    p.powerCooldownUntil.invisible = now + cooldownMs;
-    return;
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId };
   }
 
   if (powerId === "speed") {
     p.speedUntil = now + POWER_DURATION_MS;
-    p.powerCooldownUntil.speed = now + cooldownMs;
-    return;
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId };
   }
 
   if (powerId === "vision") {
     p.visionUntil = now + POWER_DURATION_MS;
-    p.powerCooldownUntil.vision = now + cooldownMs;
-    return;
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId };
   }
 
   if (powerId === "dash") {
+    const ox = p.x;
+    const oy = p.y;
     tryDashFrom(p);
-    p.powerCooldownUntil.dash = now + cooldownMs;
-    return;
+    const moved = dist(ox, oy, p.x, p.y);
+    if (moved < DASH_MIN_MOVE_PX) {
+      p.vx = 0;
+      p.vy = 0;
+      return { ok: false, reason: "no_move" };
+    }
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId };
   }
 
   if (powerId === "disguise") {
     const candidates = [...room.players.values()].filter(
-      (o) => o.id !== p.id && isPlayerActive(o) && o.alive
+      (o) => o.id !== p.id && o.alive
     );
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) return { ok: false, reason: "no_target" };
     const target = candidates[Math.floor(Math.random() * candidates.length)];
     p.disguiseUntil = now + POWER_DURATION_MS;
     p.disguiseName = target.name;
     p.disguiseColor = target.color;
-    p.powerCooldownUntil.disguise = now + cooldownMs;
-    return;
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId };
   }
 
   if (powerId === "freeze") {
+    let hit = 0;
     for (const other of room.players.values()) {
-      if (other.id === p.id || !isPlayerActive(other) || !other.alive) continue;
+      if (other.id === p.id || !other.alive) continue;
       if (dist(p.x, p.y, other.x, other.y) > FREEZE_RADIUS) continue;
       other.frozenUntil = now + FREEZE_DURATION_MS;
+      other.vx = 0;
+      other.vy = 0;
+      hit++;
     }
-    p.powerCooldownUntil.freeze = now + cooldownMs;
+    applyPowerCooldown(p, powerId, now, room);
+    return { ok: true, powerId, frozenCount: hit };
+  }
+
+  return { ok: false, reason: "invalid" };
+}
+
+function purgeStaleLobbyRooms() {
+  const now = Date.now();
+  for (const [code, room] of rooms) {
+    if (room.status !== "lobby") continue;
+    const created = room.createdAt || 0;
+    if (created && now - created > LOBBY_ROOM_MAX_AGE_MS) {
+      rooms.delete(code);
+      continue;
+    }
+    if (room.players.size === 0) rooms.delete(code);
   }
 }
 
@@ -752,6 +865,7 @@ io.on("connection", (socket) => {
       winner: null,
       endReason: null,
       timerEndsAt: 0,
+      createdAt: Date.now(),
     };
     room.players.set(socket.id, lobbyPlayer(socket.id, name, room));
     rooms.set(code, room);
@@ -777,7 +891,10 @@ io.on("connection", (socket) => {
     }
     const room = rooms.get(normalized);
     if (!room) {
-      socket.emit("errorMsg", { message: "Code invalide. Vérifie les 3 chiffres." });
+      socket.emit("errorMsg", {
+        message:
+          "Salle introuvable pour l’instant. Réessaie dans 2 secondes (même code).",
+      });
       return;
     }
     if (room.status !== "lobby") {
@@ -785,11 +902,6 @@ io.on("connection", (socket) => {
       socket.emit("errorMsg", {
         message: "Partie en cours. Utilise le même pseudo pour revenir.",
       });
-      return;
-    }
-    const joinName = (name || "Joueur").slice(0, 16);
-    if ([...room.players.values()].some((p) => p.name === joinName)) {
-      socket.emit("errorMsg", { message: "Ce pseudo est déjà pris dans cette salle." });
       return;
     }
     if (room.players.has(socket.id)) {
@@ -929,10 +1041,18 @@ io.on("connection", (socket) => {
 
   socket.on("usePower", (powerId) => {
     const room = getRoomForSocket(socket.id);
-    if (!room || room.status !== "playing" || room.gameOver) return;
+    if (!room || room.status !== "playing" || room.gameOver) {
+      socket.emit("powerUsed", { powerId, ok: false, reason: "no_game" });
+      return;
+    }
     const p = room.players.get(socket.id);
-    if (!p || !p.alive || p.online === false) return;
-    usePlayerPower(room, p, powerId);
+    if (!p) {
+      socket.emit("powerUsed", { powerId, ok: false, reason: "no_player" });
+      return;
+    }
+    const result = usePlayerPower(room, p, powerId);
+    socket.emit("powerUsed", { powerId, ...result });
+    if (result.ok) broadcastState(room);
   });
 
   socket.on("disconnect", () => {
@@ -943,6 +1063,7 @@ io.on("connection", (socket) => {
 function updatePlayers(room, dt) {
   const now = Date.now();
   for (const p of room.players.values()) {
+    expireTimedBuffs(p, now);
     if (!isPlayerActive(p) || !p.alive) continue;
     if (p.frozenUntil > now) {
       p.vx = 0;
@@ -961,6 +1082,7 @@ function updatePlayers(room, dt) {
 
 let last = Date.now();
 setInterval(() => {
+  purgeStaleLobbyRooms();
   const now = Date.now();
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
