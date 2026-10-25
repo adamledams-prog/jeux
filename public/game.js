@@ -15,6 +15,8 @@ const endScreen = document.getElementById("endScreen");
 const endTitle = document.getElementById("endTitle");
 const endMessage = document.getElementById("endMessage");
 const endHomeBtn = document.getElementById("endHomeBtn");
+const endRematchBtn = document.getElementById("endRematchBtn");
+const endRematchWait = document.getElementById("endRematchWait");
 const nameInput = document.getElementById("name");
 const roomCodeInput = document.getElementById("roomCode");
 const createBtn = document.getElementById("createBtn");
@@ -43,6 +45,26 @@ const aliveHud = document.getElementById("aliveHud");
 const killBtn = document.getElementById("killBtn");
 const powerPicker = document.getElementById("powerPicker");
 const powerBar = document.getElementById("powerBar");
+const resurrectPrompt = document.getElementById("resurrectPrompt");
+const resurrectCountdown = document.getElementById("resurrectCountdown");
+const resurrectYes = document.getElementById("resurrectYes");
+const resurrectNo = document.getElementById("resurrectNo");
+const returnBanner = document.getElementById("returnBanner");
+const returnBannerText = document.getElementById("returnBannerText");
+const controlMobileHint = document.getElementById("controlMobileHint");
+const comfortFab = document.getElementById("comfortFab");
+const comfortSheet = document.getElementById("comfortSheet");
+const comfortSheetClose = document.getElementById("comfortSheetClose");
+const homeVolume = document.getElementById("homeVolume");
+const homeVolumeVal = document.getElementById("homeVolumeVal");
+const homeMute = document.getElementById("homeMute");
+const homeVibrate = document.getElementById("homeVibrate");
+const homeCalmMotion = document.getElementById("homeCalmMotion");
+const sheetVolume = document.getElementById("sheetVolume");
+const sheetVolumeVal = document.getElementById("sheetVolumeVal");
+const sheetMute = document.getElementById("sheetMute");
+const sheetVibrate = document.getElementById("sheetVibrate");
+const sheetCalmMotion = document.getElementById("sheetCalmMotion");
 
 const COLOR_OPTIONS = [
   "#ef4444",
@@ -60,7 +82,8 @@ const COLOR_OPTIONS = [
 const VIEW_RADIUS = 340;
 const VIEW_RADIUS_BOOST = 130;
 const VISION_EXTRA_WALLS = 1;
-const KILL_RANGE = 52;
+const KILL_RANGE = 70;
+const PLAYER_RADIUS = 14;
 
 const POWER_CATALOG = {
   portal: {
@@ -280,6 +303,7 @@ let lobbyData = null;
 let keys = {};
 let mouse = { x: 0, y: 0 };
 let killPressed = false;
+let killHoldUntil = 0;
 let camera = { x: 0, y: 0 };
 let visibility = null;
 let controlMode = null;
@@ -294,6 +318,112 @@ let myPowers = {
 };
 const joystick = { active: false, vx: 0, vy: 0, pointerId: null };
 const JOY_RADIUS = 48;
+let lastKillEmitAt = 0;
+
+function syncMobileControlsClass() {
+  const on =
+    controlMode === "mobile" && phase === "playing" && !state?.gameOver;
+  document.body.classList.toggle("mobile-controls", on);
+  document.body.classList.toggle("game-active", phase === "playing" && Boolean(controlMode));
+}
+
+function haptic(kind) {
+  Comfort?.vibratePattern?.(kind);
+}
+
+function updateComfortFabVisibility() {
+  comfortFab.classList.toggle("hidden", phase === "home");
+}
+
+function syncComfortUi() {
+  if (typeof Comfort === "undefined") return;
+  const s = Comfort.get();
+  const volLabel = `${s.volume}%`;
+  homeVolume.value = String(s.volume);
+  homeVolumeVal.textContent = volLabel;
+  sheetVolume.value = String(s.volume);
+  sheetVolumeVal.textContent = volLabel;
+  homeMute.checked = s.muted;
+  sheetMute.checked = s.muted;
+  homeVibrate.checked = s.vibrate;
+  sheetVibrate.checked = s.vibrate;
+  homeCalmMotion.checked = s.calmMotion;
+  sheetCalmMotion.checked = s.calmMotion;
+}
+
+function openComfortSheet() {
+  syncComfortUi();
+  comfortSheet.classList.remove("hidden");
+  Sfx?.unlock();
+  haptic("tap");
+}
+
+function closeComfortSheet() {
+  comfortSheet.classList.add("hidden");
+}
+
+function bindComfortSettings() {
+  Comfort.load();
+  syncComfortUi();
+
+  const onVolume = (v) => Comfort.setVolume(v);
+  homeVolume.addEventListener("input", () => {
+    onVolume(Number(homeVolume.value));
+    syncComfortUi();
+  });
+  sheetVolume.addEventListener("input", () => {
+    onVolume(Number(sheetVolume.value));
+    syncComfortUi();
+  });
+
+  const onMute = (checked) => Comfort.setMuted(checked);
+  homeMute.addEventListener("change", () => {
+    onMute(homeMute.checked);
+    syncComfortUi();
+  });
+  sheetMute.addEventListener("change", () => {
+    onMute(sheetMute.checked);
+    syncComfortUi();
+  });
+
+  const onVibrate = (checked) => Comfort.setVibrate(checked);
+  homeVibrate.addEventListener("change", () => {
+    onVibrate(homeVibrate.checked);
+    if (homeVibrate.checked) haptic("tap");
+    syncComfortUi();
+  });
+  sheetVibrate.addEventListener("change", () => {
+    onVibrate(sheetVibrate.checked);
+    if (sheetVibrate.checked) haptic("tap");
+    syncComfortUi();
+  });
+
+  const onCalm = (checked) => Comfort.setCalmMotion(checked);
+  homeCalmMotion.addEventListener("change", () => {
+    onCalm(homeCalmMotion.checked);
+    syncComfortUi();
+  });
+  sheetCalmMotion.addEventListener("change", () => {
+    onCalm(sheetCalmMotion.checked);
+    syncComfortUi();
+  });
+
+  comfortFab.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openComfortSheet();
+  });
+  comfortSheetClose.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    closeComfortSheet();
+  });
+  comfortSheet.addEventListener("pointerdown", (e) => {
+    if (e.target === comfortSheet) closeComfortSheet();
+  });
+}
+
+bindComfortSettings();
 
 function getName() {
   return nameInput.value.trim() || "Joueur";
@@ -327,6 +457,7 @@ function clearJoinPending() {
 function resetSession() {
   clearJoinPending();
   clearJoinRetry();
+  resetDeathTracking();
   myId = socket.id;
   isHost = false;
   roomCode = null;
@@ -338,6 +469,7 @@ function resetSession() {
   killPressed = false;
   endScreen.classList.add("hidden");
   endCard.classList.remove("victory", "defeat");
+  syncMobileControlsClass();
 }
 
 function powersEnabledInLobby() {
@@ -420,6 +552,9 @@ function showHome() {
   joystickZone.classList.add("hidden");
   screenControls.classList.add("hidden");
   controlMode = null;
+  hideResurrectPrompt();
+  syncMobileControlsClass();
+  updateComfortFabVisibility();
   clearJoinPending();
 }
 
@@ -440,6 +575,7 @@ function showLobby() {
   powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
   screenControls.classList.add("hidden");
+  updateComfortFabVisibility();
 }
 
 function showControlPicker() {
@@ -452,6 +588,11 @@ function showControlPicker() {
   killBtn.classList.add("hidden");
   powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
+  const touch = Comfort?.isCoarseTouch?.();
+  controlMobileHint.classList.toggle("hidden", !touch);
+  pickMobile.classList.toggle("control-card-recommended", Boolean(touch));
+  pickDesktop.classList.toggle("control-card-recommended", !touch);
+  updateComfortFabVisibility();
 }
 
 function beginWithControlMode(mode) {
@@ -463,6 +604,7 @@ function beginWithControlMode(mode) {
   endScreen.classList.add("hidden");
   buildPowerBar();
   showGame();
+  syncMobileControlsClass();
   if (state?.gameOver) updateEndScreen(state);
 }
 
@@ -470,6 +612,8 @@ function showGame() {
   phase = "playing";
   hudTop.classList.remove("hidden");
   endScreen.classList.add("hidden");
+  syncMobileControlsClass();
+  updateComfortFabVisibility();
   canvas.focus();
 }
 
@@ -538,11 +682,12 @@ function emitUsePower(id) {
   }
   const cd = me.powerCooldownMs?.[id] || 0;
   if (cd > 0) return;
+  Sfx?.unlock();
   powerClickLock = true;
   socket.emit("usePower", id);
   setTimeout(() => {
     powerClickLock = false;
-  }, 200);
+  }, 120);
 }
 
 function buildPowerBar() {
@@ -557,7 +702,12 @@ function buildPowerBar() {
     btn.className = "power-btn";
     btn.dataset.power = id;
     btn.textContent = `${def.emoji} ${def.name}`;
-    btn.addEventListener("click", () => emitUsePower(id));
+    btn.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      emitUsePower(id);
+      e.preventDefault();
+      e.stopPropagation();
+    });
     powerBar.appendChild(btn);
   }
 }
@@ -593,8 +743,22 @@ function updatePowerBarUi(me) {
   }
 }
 
-pickDesktop.addEventListener("click", () => beginWithControlMode("desktop"));
-pickMobile.addEventListener("click", () => beginWithControlMode("mobile"));
+function pickControlMode(mode) {
+  Sfx?.unlock();
+  haptic("tap");
+  beginWithControlMode(mode);
+}
+
+pickDesktop.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  e.preventDefault();
+  pickControlMode("desktop");
+});
+pickMobile.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  e.preventDefault();
+  pickControlMode("mobile");
+});
 
 function resetJoystick() {
   joystick.active = false;
@@ -629,16 +793,18 @@ function updateJoystickFromPointer(clientX, clientY) {
   }
 }
 
-joystickBase.addEventListener("pointerdown", (e) => {
+function onJoystickPointerDown(e) {
   if (controlMode !== "mobile") return;
   joystick.active = true;
   joystick.pointerId = e.pointerId;
-  joystickBase.setPointerCapture(e.pointerId);
+  joystickZone.setPointerCapture(e.pointerId);
   updateJoystickFromPointer(e.clientX, e.clientY);
   e.preventDefault();
-});
+}
 
-joystickBase.addEventListener("pointermove", (e) => {
+joystickZone.addEventListener("pointerdown", onJoystickPointerDown);
+
+joystickZone.addEventListener("pointermove", (e) => {
   if (!joystick.active || e.pointerId !== joystick.pointerId) return;
   updateJoystickFromPointer(e.clientX, e.clientY);
   e.preventDefault();
@@ -649,22 +815,41 @@ function endJoystick(e) {
   resetJoystick();
 }
 
-joystickBase.addEventListener("pointerup", endJoystick);
-joystickBase.addEventListener("pointercancel", endJoystick);
+joystickZone.addEventListener("pointerup", endJoystick);
+joystickZone.addEventListener("pointercancel", endJoystick);
 
-killBtn.addEventListener("click", () => {
+function requestKill() {
+  if (myRole !== "impostor" || phase !== "playing" || state?.gameOver) return;
+  const me = state?.players?.[myId];
+  if (!me?.alive || me.frozen) return;
+  if (!canKillNearby(me)) return;
+  const now = Date.now();
+  if (now - lastKillEmitAt < 450) return;
+  lastKillEmitAt = now;
+  Sfx?.unlock();
+  haptic("kill");
+  socket.emit("kill");
+}
+
+killBtn.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
   if (!killBtn.classList.contains("ready")) return;
-  killPressed = true;
-  if (myId && phase === "playing") {
-    socket.emit("input", getInput());
-  }
+  requestKill();
+  e.preventDefault();
+  e.stopPropagation();
 });
 
 function resize() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  const vv = window.visualViewport;
+  const w = vv ? Math.round(vv.width) : window.innerWidth;
+  const h = vv ? Math.round(vv.height) : window.innerHeight;
+  canvas.width = w;
+  canvas.height = h;
 }
 window.addEventListener("resize", resize);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", resize);
+}
 resize();
 
 roomCodeInput.addEventListener("input", () => {
@@ -703,6 +888,13 @@ leaveLobbyBtn.addEventListener("click", () => {
 
 endHomeBtn.addEventListener("click", () => {
   leaveToHome();
+});
+
+endRematchBtn.addEventListener("click", () => {
+  Sfx?.unlock();
+  Sfx?.rematch();
+  haptic("tap");
+  socket.emit("rematchGame");
 });
 
 startBtn.addEventListener("click", () => {
@@ -756,6 +948,8 @@ socket.on("errorMsg", ({ message }) => {
 socket.on("joinedRoom", ({ id, code, isHost: host, lobby }) => {
   clearJoinPending();
   clearJoinRetry();
+  Sfx?.join();
+  haptic("join");
   myId = id;
   roomCode = code;
   isHost = host;
@@ -776,20 +970,43 @@ socket.on("leftRoom", () => {
 });
 
 socket.on("lobby", (data) => {
+  if (lobbyData && data.players.length > lobbyData.players.length) {
+    Sfx?.lobbyPlayer();
+    haptic("tap");
+  }
   applyLobbyData(data);
   if (data.status === "playing" && (phase === "lobby" || phase === "controlPick") && !myRole) {
     socket.emit("syncGame");
   }
 });
 
-socket.on("gameStarted", ({ role }) => {
+socket.on("gameStarted", ({ role, rematch }) => {
   clearJoinPending();
   myRole = role;
-  state = null;
-  controlMode = null;
   roleHud.textContent = role === "impostor" ? "Rôle : Imposteur" : "Rôle : Innocent";
   endScreen.classList.add("hidden");
   endCard.classList.remove("victory", "defeat");
+  endRematchBtn.classList.add("hidden");
+  endRematchWait.classList.add("hidden");
+
+  if (rematch && controlMode) {
+    state = null;
+    killPressed = false;
+    killHoldUntil = 0;
+    resetDeathTracking();
+    Sfx?.startGame();
+    haptic("start");
+    buildPowerBar();
+    showGame();
+    joystickZone.classList.toggle("hidden", controlMode !== "mobile");
+    syncMobileControlsClass();
+    return;
+  }
+
+  state = null;
+  controlMode = null;
+  Sfx?.startGame();
+  haptic("start");
   if (phase === "playing" && controlMode) return;
   showControlPicker();
 });
@@ -816,9 +1033,274 @@ socket.on("connect", () => {
   }
 });
 
-socket.on("powerUsed", ({ powerId, ok, reason, action, frozenCount }) => {
+let lastAliveCount = null;
+const deathBursts = [];
+const returnBursts = [];
+const playerAlivePrev = {};
+const DEATH_ANIM_MS = 1200;
+const RETURN_ANIM_MS = 1600;
+let resurrectCountdownTimer = null;
+let resurrectOfferEndsAt = 0;
+let returnBannerHideTimer = null;
+let deathFlashUntil = 0;
+let wasFrozen = false;
+let timerWarned30 = false;
+let timerWarned10 = false;
+let killReadyWas = false;
+let lastTimerBeepSec = -1;
+
+function resetDeathTracking() {
+  for (const k of Object.keys(playerAlivePrev)) delete playerAlivePrev[k];
+  deathBursts.length = 0;
+  returnBursts.length = 0;
+  deathFlashUntil = 0;
+  hideResurrectPrompt();
+  hideReturnBanner();
+  wasFrozen = false;
+  timerWarned30 = false;
+  timerWarned10 = false;
+  killReadyWas = false;
+  lastTimerBeepSec = -1;
+}
+
+function processDeathTransitions(s) {
+  if (!s?.players || phase !== "playing") return;
+  for (const [id, p] of Object.entries(s.players)) {
+    const prev = playerAlivePrev[id];
+    if (prev === true && p.alive === false) {
+      deathBursts.push({
+        x: p.x,
+        y: p.y,
+        color: id === myId ? p.color : p.appearanceColor || p.color,
+        start: performance.now(),
+        isMe: id === myId,
+      });
+      Sfx?.deathBurst();
+      if (id === myId) {
+        deathFlashUntil = performance.now() + 700;
+        haptic("death");
+      } else if (myRole === "impostor") {
+        Sfx?.kill();
+        haptic("kill");
+      }
+    }
+    playerAlivePrev[id] = p.alive;
+  }
+}
+
+function hideReturnBanner() {
+  if (returnBannerHideTimer) {
+    clearTimeout(returnBannerHideTimer);
+    returnBannerHideTimer = null;
+  }
+  returnBanner.classList.remove("visible");
+  returnBanner.classList.add("hidden");
+}
+
+function showReturnBanner() {
+  returnBannerText.textContent = "Un joueur est de retour";
+  returnBanner.classList.remove("hidden");
+  returnBanner.classList.remove("visible");
+  void returnBanner.offsetWidth;
+  returnBanner.classList.add("visible");
+  if (returnBannerHideTimer) clearTimeout(returnBannerHideTimer);
+  returnBannerHideTimer = setTimeout(() => {
+    returnBannerHideTimer = null;
+    hideReturnBanner();
+  }, 3200);
+}
+
+function playResurrectFx(data) {
+  if (!data) return;
+  returnBursts.push({
+    x: data.x,
+    y: data.y,
+    color: data.color || "#4ade80",
+    start: performance.now(),
+    isMe: data.playerId === myId,
+  });
+  showReturnBanner();
+  Sfx?.playerReturn();
+  haptic("return");
+  if (data.playerId === myId) {
+    deathFlashUntil = 0;
+    playerAlivePrev[myId] = true;
+    endScreen.classList.add("hidden");
+    joystickZone.classList.toggle("hidden", controlMode !== "mobile");
+    syncMobileControlsClass();
+  }
+}
+
+function hideResurrectPrompt() {
+  resurrectPrompt.classList.add("hidden");
+  resurrectOfferEndsAt = 0;
+  if (resurrectCountdownTimer) {
+    clearInterval(resurrectCountdownTimer);
+    resurrectCountdownTimer = null;
+  }
+}
+
+function showResurrectPrompt(timeoutMs) {
+  Sfx?.unlock();
+  Sfx?.resurrectOffer();
+  haptic("offer");
+  resurrectOfferEndsAt = Date.now() + timeoutMs;
+  resurrectPrompt.classList.remove("hidden");
+  const tick = () => {
+    const left = Math.max(0, resurrectOfferEndsAt - Date.now());
+    const sec = Math.ceil(left / 1000);
+    resurrectCountdown.textContent = left > 0 ? `Temps pour choisir : ${sec} s` : "Temps écoulé…";
+  };
+  tick();
+  if (resurrectCountdownTimer) clearInterval(resurrectCountdownTimer);
+  resurrectCountdownTimer = setInterval(tick, 250);
+}
+
+function sendResurrectChoice(accept) {
+  if (!resurrectOfferEndsAt || Date.now() > resurrectOfferEndsAt + 400) {
+    hideResurrectPrompt();
+    return;
+  }
+  Sfx?.unlock();
+  hideResurrectPrompt();
+  socket.emit("resurrectChoice", accept === true);
+}
+
+resurrectYes.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  e.preventDefault();
+  sendResurrectChoice(true);
+});
+resurrectNo.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  e.preventDefault();
+  sendResurrectChoice(false);
+});
+
+function drawReturnBursts(now) {
+  for (let i = returnBursts.length - 1; i >= 0; i--) {
+    const b = returnBursts[i];
+    const t = (now - b.start) / RETURN_ANIM_MS;
+    if (t >= 1) {
+      returnBursts.splice(i, 1);
+      continue;
+    }
+    const ease = 1 - (1 - t) ** 3;
+    const ringR = 8 + ease * 64;
+    const alpha = 1 - t * 0.85;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    ctx.strokeStyle = b.isMe ? "#86efac" : "#4ade80";
+    ctx.lineWidth = 5 - t * 2.5;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255, 255, 220, 0.75)";
+    ctx.font = `700 ${Math.round(16 + ease * 22)}px Space Grotesk, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("✦", b.x, b.y - ease * 28);
+
+    for (let n = 0; n < 12; n++) {
+      const ang = (n / 12) * Math.PI * 2 + t * 5;
+      const dist = ringR * (0.2 + t * 0.75);
+      const px = b.x + Math.cos(ang) * dist;
+      const py = b.y + Math.sin(ang) * dist - t * 18;
+      const s = 4 + (1 - t) * 4;
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.arc(px, py, s, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawDeathBursts(now) {
+  for (let i = deathBursts.length - 1; i >= 0; i--) {
+    const b = deathBursts[i];
+    const t = (now - b.start) / DEATH_ANIM_MS;
+    if (t >= 1) {
+      deathBursts.splice(i, 1);
+      continue;
+    }
+    const ease = 1 - (1 - t) ** 2;
+    const ringR = 10 + ease * 52;
+    const alpha = 1 - t * 0.92;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    ctx.strokeStyle = b.isMe ? "#ff6b6b" : "#ef4444";
+    ctx.lineWidth = 4 - t * 2;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255, 220, 220, 0.55)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, ringR * 0.55, 0, Math.PI * 2);
+    ctx.stroke();
+
+    for (let n = 0; n < 10; n++) {
+      const ang = (n / 10) * Math.PI * 2 + t * 4;
+      const dist = ringR * (0.35 + t * 0.5);
+      const px = b.x + Math.cos(ang) * dist;
+      const py = b.y + Math.sin(ang) * dist;
+      const s = 5 * (1 - t * 0.6);
+      ctx.fillStyle = b.color;
+      ctx.fillRect(px - s / 2, py - s / 2, s, s);
+    }
+
+    ctx.fillStyle = "#fff";
+    ctx.font = `700 ${Math.round(18 + ease * 14)}px Space Grotesk, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("✕", b.x, b.y - ease * 6);
+
+    ctx.restore();
+  }
+}
+
+socket.on("powerUsed", ({ powerId, ok, reason, action }) => {
   powerClickLock = false;
-  if (ok) return;
+  if (ok) {
+    switch (powerId) {
+      case "portal":
+        if (action === "teleport") Sfx?.portalTeleport();
+        else Sfx?.portalPlace();
+        break;
+      case "dash":
+        Sfx?.dash();
+        break;
+      case "invisible":
+        Sfx?.invisible();
+        break;
+      case "speed":
+        Sfx?.speed();
+        break;
+      case "disguise":
+        Sfx?.disguise();
+        break;
+      case "vision":
+        Sfx?.vision();
+        break;
+      case "freeze":
+        Sfx?.freeze();
+        break;
+      default:
+        Sfx?.power();
+    }
+    haptic("power");
+    return;
+  }
+  Sfx?.powerFail();
+  haptic("powerFail");
   const msg = POWER_FAIL_MSG[reason] || "Pouvoir impossible pour l’instant.";
   powerToastUntil = Date.now() + 2200;
   if (phase === "playing") {
@@ -839,12 +1321,35 @@ socket.on("disconnect", () => {
   }, 18000);
 });
 
+socket.on("resurrectOffer", ({ timeoutMs }) => {
+  if (phase !== "playing") return;
+  showResurrectPrompt(timeoutMs || 14000);
+});
+
+socket.on("resurrectOfferClosed", () => {
+  hideResurrectPrompt();
+});
+
+socket.on("resurrectResult", () => {
+  hideResurrectPrompt();
+});
+
+socket.on("playerResurrected", (data) => {
+  playResurrectFx(data);
+});
+
 function updateEndScreen(s) {
-  if (!s.gameOver || phase !== "playing" || !controlMode) return;
+  if (phase !== "playing" || !controlMode) return;
+  if (!s.gameOver) {
+    endScreen.classList.add("hidden");
+    return;
+  }
+  hideResurrectPrompt();
   endScreen.classList.remove("hidden");
   joystickZone.classList.add("hidden");
   killBtn.classList.add("hidden");
   powerBar.classList.add("hidden");
+  syncMobileControlsClass();
   endCard.classList.remove("victory", "defeat");
 
   const innocentWin = s.winner === "innocents";
@@ -866,6 +1371,15 @@ function updateEndScreen(s) {
     endTitle.textContent = "Victoire des innocents !";
   }
   endMessage.textContent = s.endReason || "";
+  endRematchBtn.classList.toggle("hidden", !isHost);
+  endRematchWait.classList.toggle("hidden", isHost);
+  if (iLost) {
+    Sfx?.defeat();
+    haptic("defeat");
+  } else if (iWon) {
+    Sfx?.victory();
+    haptic("victory");
+  }
 }
 
 socket.on("state", (s) => {
@@ -875,8 +1389,12 @@ socket.on("state", (s) => {
     return;
   }
   state = s;
+  processDeathTransitions(s);
   if (s.players?.[myId] && phase === "playing" && powerBar.children.length === 0) {
     buildPowerBar();
+  }
+  if (phase === "playing") {
+    lastAliveCount = s.innocentsAlive ?? null;
   }
   updateEndScreen(s);
 });
@@ -942,7 +1460,8 @@ function updateLobbyUi() {
 
 window.addEventListener("keydown", (e) => {
   keys[e.code] = true;
-  if (e.code === "KeyE") killPressed = true;
+  if (e.code === "KeyE") requestKill();
+  Sfx?.unlock();
   if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
     e.preventDefault();
   }
@@ -992,20 +1511,13 @@ function getInput() {
     angle = Math.atan2(mouse.y - wy, mouse.x - wx);
   }
 
-  const canKill =
-    killPressed &&
-    myRole === "impostor" &&
-    me?.alive &&
-    !me?.frozen &&
-    !state?.gameOver;
-  return { vx, vy, angle, kill: canKill };
+  return { vx, vy, angle, kill: false };
 }
 
 setInterval(() => {
   if (!myId || phase !== "playing" || !controlMode || state?.gameOver) return;
   const input = getInput();
   socket.emit("input", input);
-  if (input.kill) killPressed = false;
 }, 1000 / 30);
 
 function tileBlocksSight(maze, tx, ty) {
@@ -1038,6 +1550,21 @@ function hasLineOfSight(x0, y0, x1, y1, maze, tile, maxWallSegments = 0) {
   return wallSegmentsOnLine(x0, y0, x1, y1, maze, tile) <= maxWallSegments;
 }
 
+function hasKillLineOfSight(x0, y0, x1, y1, maze, tile) {
+  if (hasLineOfSight(x0, y0, x1, y1, maze, tile)) return true;
+  const r = PLAYER_RADIUS * 0.85;
+  const offsets = [
+    [r, 0],
+    [-r, 0],
+    [0, r],
+    [0, -r],
+  ];
+  for (const [ox, oy] of offsets) {
+    if (hasLineOfSight(x0, y0, x1 + ox, y1 + oy, maze, tile)) return true;
+  }
+  return false;
+}
+
 function myViewRadius(me) {
   if (me?.visionActive) return VIEW_RADIUS + VIEW_RADIUS_BOOST;
   return VIEW_RADIUS;
@@ -1065,6 +1592,86 @@ function computeVisibility(map, px, py, me) {
   return vis;
 }
 
+const mapAmbientDots = [];
+let mapAmbientReady = false;
+
+function ensureMapAmbient(map) {
+  if (mapAmbientReady || !map) return;
+  mapAmbientReady = true;
+  const mw = map.w * map.tile;
+  const mh = map.h * map.tile;
+  for (let i = 0; i < 72; i++) {
+    mapAmbientDots.push({
+      x: Math.random() * mw,
+      y: Math.random() * mh,
+      phase: Math.random() * Math.PI * 2,
+      speed: 0.45 + Math.random() * 1.1,
+      size: 0.8 + Math.random() * 2.2,
+    });
+  }
+}
+
+function mapAnimTime(now) {
+  return now * 0.001;
+}
+
+function mapCameraWobble(t) {
+  if (Comfort?.shouldReduceMotion?.()) {
+    return { wx: 0, wy: 0, scale: 1 };
+  }
+  const breathe = Math.sin(t * 1.15) * 1.35;
+  const wx = Math.sin(t * 2.05) * 0.95 + Math.sin(t * 5.3 + 0.4) * 0.28 + breathe * 0.15;
+  const wy = Math.cos(t * 1.75) * 0.9 + Math.sin(t * 4.1) * 0.22;
+  const scale = 1 + Math.sin(t * 0.85) * 0.0045;
+  return { wx, wy, scale };
+}
+
+function drawMapBackground(map, t) {
+  const calm = Comfort?.shouldReduceMotion?.();
+  const W = map.w * map.tile;
+  const H = map.h * map.tile;
+  const pulse = calm ? 0.5 : 0.5 + 0.5 * Math.sin(t * 0.72);
+  const g = ctx.createRadialGradient(W * 0.5, H * 0.5, 30, W * 0.5, H * 0.5, Math.max(W, H) * 0.72);
+  g.addColorStop(0, `rgba(52, 78, 118, ${0.28 + pulse * 0.1})`);
+  g.addColorStop(0.55, "rgba(22, 30, 46, 0.92)");
+  g.addColorStop(1, "rgba(8, 10, 16, 1)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  if (calm) return;
+
+  ctx.strokeStyle = `rgba(100, 160, 255, ${0.04 + pulse * 0.03})`;
+  ctx.lineWidth = 1;
+  const wave = Math.sin(t * 1.4) * 8;
+  for (let y = -wave; y < H + 40; y += 28) {
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 12) {
+      const dy = Math.sin(x * 0.04 + t * 1.8 + y * 0.02) * 3;
+      if (x === 0) ctx.moveTo(x, y + dy);
+      else ctx.lineTo(x, y + dy);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawMapAmbient(map, vis, t) {
+  if (Comfort?.shouldReduceMotion?.()) return;
+  const { maze, tile, w, h } = map;
+  for (const dot of mapAmbientDots) {
+    const tx = Math.floor(dot.x / tile);
+    const ty = Math.floor(dot.y / tile);
+    if (ty < 0 || tx < 0 || ty >= h || tx >= w) continue;
+    if (maze[ty][tx] === 1 || !vis[ty][tx]) continue;
+    const driftX = Math.sin(t * dot.speed + dot.phase) * 7;
+    const driftY = Math.cos(t * dot.speed * 0.85 + dot.phase * 1.3) * 6;
+    const alpha = 0.1 + 0.14 * (0.5 + 0.5 * Math.sin(t * 2.4 + dot.phase));
+    ctx.fillStyle = `rgba(140, 210, 255, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(dot.x + driftX, dot.y + driftY, dot.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 function canSeePlayer(me, other, maze, tile) {
   if (other.hidden && other.id !== myId) return false;
   const radius = myViewRadius(me);
@@ -1077,56 +1684,70 @@ function canSeePlayer(me, other, maze, tile) {
   return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile, maxWalls);
 }
 
-function drawTile(x, y, tile, isWall, visible, tx, ty) {
+function drawTile(x, y, tile, isWall, visible, tx, ty, t) {
   if (!visible) return;
+  const tilePulse = 0.5 + 0.5 * Math.sin(t * 1.6 + tx * 0.55 + ty * 0.42);
   if (isWall) {
-    const wallGrad = ctx.createLinearGradient(x, y, x, y + tile);
-    wallGrad.addColorStop(0, "#3d4f6a");
-    wallGrad.addColorStop(1, "#243044");
+    const calm = Comfort?.shouldReduceMotion?.();
+    const vibrate = calm ? 0 : Math.sin(t * 3.2 + tx * 1.1 + ty * 0.8) * 0.35;
+    const wx = x + vibrate;
+    const wy = y + vibrate * 0.6;
+    const wallGrad = ctx.createLinearGradient(wx, wy, wx, wy + tile);
+    const top = 58 + tilePulse * 10;
+    wallGrad.addColorStop(0, `rgb(${top + 4}, ${top + 18}, ${top + 42})`);
+    wallGrad.addColorStop(1, `rgb(${36 + tilePulse * 6}, ${46 + tilePulse * 4}, ${64 + tilePulse * 5})`);
     ctx.fillStyle = wallGrad;
-    ctx.fillRect(x, y, tile, tile);
-    ctx.strokeStyle = "#5a6f8f";
-    ctx.strokeRect(x + 0.5, y + 0.5, tile - 1, tile - 1);
-    ctx.fillStyle = "rgba(160, 190, 230, 0.12)";
-    ctx.fillRect(x + 3, y + 3, tile - 6, 5);
+    ctx.fillRect(wx, wy, tile, tile);
+    ctx.strokeStyle = `rgba(110, 145, 190, ${0.45 + tilePulse * 0.2})`;
+    ctx.strokeRect(wx + 0.5, wy + 0.5, tile - 1, tile - 1);
+    const shimmer = 3 + Math.sin(t * 2.8 + tx + ty) * 2;
+    ctx.fillStyle = `rgba(180, 220, 255, ${0.08 + tilePulse * 0.1})`;
+    ctx.fillRect(wx + shimmer, wy + 3, tile - shimmer * 2, 5);
+    ctx.fillStyle = `rgba(255, 120, 140, ${0.03 + tilePulse * 0.04})`;
+    ctx.fillRect(wx + tile - 6, wy + tile - 8, 4, 4);
   } else {
     const floorGrad = ctx.createLinearGradient(x, y, x + tile, y + tile);
-    floorGrad.addColorStop(0, "#3a4a62");
-    floorGrad.addColorStop(1, "#2a3548");
+    const lift = tilePulse * 8;
+    floorGrad.addColorStop(0, `rgb(${56 + lift}, ${72 + lift}, ${94 + lift})`);
+    floorGrad.addColorStop(1, `rgb(${40 + lift * 0.5}, ${50 + lift * 0.4}, ${68 + lift * 0.5})`);
     ctx.fillStyle = floorGrad;
     ctx.fillRect(x, y, tile, tile);
-    if ((tx + ty) % 2 === 0) {
-      ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
-      ctx.fillRect(x, y, tile, tile);
-    }
-    ctx.fillStyle = "rgba(140, 180, 255, 0.1)";
-    ctx.fillRect(x + 4, y + 4, tile - 8, tile / 2 - 2);
-    ctx.strokeStyle = "rgba(100, 140, 200, 0.15)";
+    const checker = (tx + ty) % 2 === 0;
+    ctx.fillStyle = `rgba(255, 255, 255, ${checker ? 0.035 + tilePulse * 0.03 : 0.015})`;
+    ctx.fillRect(x, y, tile, tile);
+    const glossY = 4 + Math.sin(t * 2.2 + tx * 0.7) * 2;
+    ctx.fillStyle = `rgba(160, 210, 255, ${0.07 + tilePulse * 0.08})`;
+    ctx.fillRect(x + 4, y + glossY, tile - 8, tile / 2 - 2);
+    ctx.strokeStyle = `rgba(120, 170, 230, ${0.12 + tilePulse * 0.1})`;
     ctx.strokeRect(x + 1, y + 1, tile - 2, tile - 2);
   }
 }
 
-function drawPlayerGlow(px, py, radius) {
-  const glow = ctx.createRadialGradient(px, py, 8, px, py, radius * 0.85);
-  glow.addColorStop(0, "rgba(120, 170, 255, 0.22)");
+function drawPlayerGlow(px, py, radius, t) {
+  const pulse = 0.92 + 0.08 * Math.sin(t * 2.1);
+  const r = radius * pulse;
+  const glow = ctx.createRadialGradient(px, py, 8, px, py, r * 0.88);
+  const core = 0.2 + 0.06 * Math.sin(t * 3);
+  glow.addColorStop(0, `rgba(120, 180, 255, ${core})`);
   glow.addColorStop(0.45, "rgba(80, 120, 200, 0.08)");
   glow.addColorStop(1, "rgba(0, 0, 0, 0)");
   ctx.fillStyle = glow;
-  ctx.fillRect(px - radius, py - radius, radius * 2, radius * 2);
+  ctx.fillRect(px - r, py - r, r * 2, r * 2);
 }
 
-function drawMaze(map, vis) {
+function drawMaze(map, vis, t) {
   const { maze, tile, w, h } = map;
   for (let ty = 0; ty < h; ty++) {
     for (let tx = 0; tx < w; tx++) {
-      drawTile(tx * tile, ty * tile, tile, maze[ty][tx] === 1, vis[ty][tx], tx, ty);
+      drawTile(tx * tile, ty * tile, tile, maze[ty][tx] === 1, vis[ty][tx], tx, ty, t);
     }
   }
 }
 
-function drawFog(map, vis) {
+function drawFog(map, vis, t) {
   const { tile, w, h } = map;
-  ctx.fillStyle = "rgba(0, 0, 0, 0.78)";
+  const fogPulse = 0.76 + 0.04 * Math.sin(t * 1.3);
+  ctx.fillStyle = `rgba(0, 0, 0, ${fogPulse})`;
   for (let ty = 0; ty < h; ty++) {
     for (let tx = 0; tx < w; tx++) {
       if (!vis[ty][tx]) {
@@ -1134,20 +1755,45 @@ function drawFog(map, vis) {
       }
     }
   }
+  ctx.fillStyle = `rgba(30, 50, 90, ${0.04 + 0.03 * Math.sin(t * 2)})`;
+  for (let ty = 0; ty < h; ty++) {
+    for (let tx = 0; tx < w; tx++) {
+      if (vis[ty][tx]) continue;
+      const edge =
+        (tx > 0 && vis[ty][tx - 1]) ||
+        (tx < w - 1 && vis[ty][tx + 1]) ||
+        (ty > 0 && vis[ty - 1][tx]) ||
+        (ty < h - 1 && vis[ty + 1][tx]);
+      if (edge) {
+        ctx.fillRect(tx * tile, ty * tile, tile, tile);
+      }
+    }
+  }
 }
 
-function drawPortal(portal) {
+function drawPortal(portal, t) {
   if (!portal) return;
   ctx.save();
   ctx.translate(portal.x, portal.y);
+  const spin = t * 2.4;
+  const pulse = 14 + Math.sin(t * 4) * 3;
+  ctx.rotate(spin);
   ctx.strokeStyle = "#22d3ee";
   ctx.lineWidth = 3;
   ctx.shadowColor = "#22d3ee";
-  ctx.shadowBlur = 14;
+  ctx.shadowBlur = 12 + Math.sin(t * 5) * 6;
   ctx.beginPath();
-  ctx.arc(0, 0, 16, 0, Math.PI * 2);
+  ctx.arc(0, 0, pulse, 0, Math.PI * 2);
   ctx.stroke();
-  ctx.fillStyle = "rgba(34, 211, 238, 0.25)";
+  ctx.rotate(-spin * 2);
+  ctx.strokeStyle = "rgba(165, 243, 252, 0.55)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, pulse * 0.65, 0, Math.PI * 1.35);
+  ctx.stroke();
+  ctx.fillStyle = `rgba(34, 211, 238, ${0.2 + 0.08 * Math.sin(t * 6)})`;
+  ctx.beginPath();
+  ctx.arc(0, 0, pulse * 0.5, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
   ctx.restore();
@@ -1170,7 +1816,7 @@ function drawPlayerCube(p, isMe, dead) {
   ctx.rotate(p.angle);
 
   if (dead) {
-    ctx.globalAlpha = 0.45;
+    ctx.globalAlpha = 0.38;
   } else if (p.hidden && isMe) {
     ctx.globalAlpha = 0.35;
   } else if (p.frozen) {
@@ -1210,7 +1856,7 @@ function canKillNearby(me) {
   for (const p of Object.values(state.players)) {
     if (!p.alive || p.id === myId || p.hidden) continue;
     if (Math.hypot(p.x - me.x, p.y - me.y) > KILL_RANGE) continue;
-    if (hasLineOfSight(me.x, me.y, p.x, p.y, maze, tile)) return true;
+    if (hasKillLineOfSight(me.x, me.y, p.x, p.y, maze, tile)) return true;
   }
   return false;
 }
@@ -1227,6 +1873,11 @@ function updateKillButton(me) {
   killBtn.classList.toggle("ready", ready);
   killBtn.disabled = !ready;
   killBtn.textContent = ready ? "Tuer" : "Tuer (trop loin)";
+  if (ready && !killReadyWas) {
+    Sfx?.killReady();
+    haptic("killReady");
+  }
+  killReadyWas = ready;
 }
 
 function updateHud() {
@@ -1239,18 +1890,68 @@ function updateHud() {
     timerHud.textContent = `Temps ${formatTime(state.timeLeftMs || 0)}`;
   }
   aliveHud.textContent = `Innocents vivants : ${state.innocentsAlive ?? "—"}`;
-  updateKillButton(state.players[myId]);
-  updatePowerBarUi(state.players[myId]);
+  const me = state.players[myId];
+  if (me?.frozen && !wasFrozen) {
+    Sfx?.frozenHit();
+    haptic("frozen");
+  }
+  wasFrozen = Boolean(me?.frozen);
+
+  const ms = state.timeLeftMs ?? 0;
+  if (ms > 0 && ms <= 30000 && !timerWarned30) {
+    timerWarned30 = true;
+    Sfx?.timerWarn30();
+    haptic("timerWarn");
+  }
+  if (ms > 0 && ms <= 10000 && !timerWarned10) {
+    timerWarned10 = true;
+    Sfx?.timerWarn10();
+    haptic("timerUrgent");
+  }
+  if (ms > 0 && ms <= 5000 && Math.ceil(ms / 1000) <= 5) {
+    const sec = Math.ceil(ms / 1000);
+    if (sec <= 3 && sec !== lastTimerBeepSec) {
+      lastTimerBeepSec = sec;
+      Sfx?.timerFinal();
+      haptic("timerFinal");
+    }
+  } else if (ms > 5000) {
+    lastTimerBeepSec = -1;
+  }
+
+  updateKillButton(me);
+  updatePowerBarUi(me);
+}
+
+function drawScreenVignette(t) {
+  const pulse = Comfort?.shouldReduceMotion?.() ? 0.5 : 0.5 + 0.5 * Math.sin(t * 0.9);
+  const g = ctx.createRadialGradient(
+    canvas.width / 2,
+    canvas.height / 2,
+    canvas.height * 0.2,
+    canvas.width / 2,
+    canvas.height / 2,
+    Math.max(canvas.width, canvas.height) * 0.72
+  );
+  g.addColorStop(0, "rgba(0,0,0,0)");
+  g.addColorStop(1, `rgba(0, 0, 0, ${0.22 + pulse * 0.05})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
 function render() {
-  ctx.fillStyle = "#000";
+  const animNow = performance.now();
+  const t = mapAnimTime(animNow);
+
+  ctx.fillStyle = "#05070c";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   if (phase !== "playing" || !state?.map) {
     requestAnimationFrame(render);
     return;
   }
+
+  ensureMapAmbient(state.map);
 
   const me = state.players[myId];
   if (me) {
@@ -1260,13 +1961,18 @@ function render() {
   }
 
   const viewR = me ? myViewRadius(me) : VIEW_RADIUS;
+  const wobble = mapCameraWobble(t);
 
   ctx.save();
-  ctx.translate(canvas.width / 2 - camera.x, canvas.height / 2 - camera.y);
+  ctx.translate(canvas.width / 2 + wobble.wx, canvas.height / 2 + wobble.wy);
+  ctx.scale(wobble.scale, wobble.scale);
+  ctx.translate(-camera.x, -camera.y);
 
   if (visibility) {
-    drawMaze(state.map, visibility);
-    if (me) drawPlayerGlow(me.x, me.y, viewR);
+    drawMapBackground(state.map, t);
+    drawMaze(state.map, visibility, t);
+    drawMapAmbient(state.map, visibility, t);
+    if (me) drawPlayerGlow(me.x, me.y, viewR, t);
   }
 
   for (const p of Object.values(state.players)) {
@@ -1274,7 +1980,7 @@ function render() {
     const portalVisible =
       p.id === myId ||
       (me && hasLineOfSight(me.x, me.y, p.portal.x, p.portal.y, state.map.maze, state.map.tile));
-    if (portalVisible) drawPortal(p.portal);
+    if (portalVisible) drawPortal(p.portal, t);
   }
 
   const sorted = Object.values(state.players).sort((a, b) => a.y - b.y);
@@ -1287,11 +1993,23 @@ function render() {
     if (visible) drawPlayerCube(p, false, !p.alive);
   }
 
+  drawDeathBursts(animNow);
+  drawReturnBursts(animNow);
+
   if (visibility) {
-    drawFog(state.map, visibility);
+    drawFog(state.map, visibility, t);
   }
 
   ctx.restore();
+
+  drawScreenVignette(t);
+
+  const flashNow = animNow;
+  if (flashNow < deathFlashUntil) {
+    const u = 1 - (deathFlashUntil - flashNow) / 700;
+    ctx.fillStyle = `rgba(220, 38, 38, ${0.45 * (1 - u)})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   if (me && me.frozen && me.alive) {
     ctx.fillStyle = "rgba(125, 211, 252, 0.12)";
@@ -1300,7 +2018,7 @@ function render() {
     ctx.fillText("Tu es gelé !", canvas.width / 2, canvas.height - 48);
   }
 
-  if (me && !me.alive) {
+  if (me && !me.alive && resurrectPrompt.classList.contains("hidden")) {
     ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#fff";

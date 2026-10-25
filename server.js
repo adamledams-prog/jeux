@@ -10,7 +10,8 @@ const MAP_H = 15;
 const TILE = 40;
 const PLAYER_RADIUS = 14;
 const PLAYER_SPEED = 180;
-const KILL_RANGE = 52;
+const KILL_RANGE = 70;
+const MIN_SPAWN_DIST = TILE * 3.2;
 const KILL_COOLDOWN_MS = 25000;
 const POWER_DURATION_MS = 4000;
 const POWER_COOLDOWN_MIN_SEC = 12;
@@ -22,6 +23,8 @@ const FREEZE_DURATION_MS = 2000;
 const POWER_USE_MIN_INTERVAL_MS = 150;
 const DASH_MIN_MOVE_PX = 6;
 const LOBBY_ROOM_MAX_AGE_MS = 45 * 60 * 1000;
+const RESURRECT_CHANCE = 0.28;
+const RESURRECT_OFFER_MS = 14000;
 const POWER_IDS = [
   "portal",
   "invisible",
@@ -88,15 +91,15 @@ const COLOR_OPTIONS = [
 const MAZE = [
   "1111111111111111111111111",
   "1000000010001000000010001",
-  "1011111010111011111010111",
+  "1011001010111010111010111",
   "1000000000000000000000001",
-  "1010111111110111111110101",
-  "1000100000000100000000101",
-  "1110101111110101111110101",
-  "1000101000000101000000101",
-  "1011101011110101011110101",
-  "1000001000000101000000101",
-  "1011111011110101011110101",
+  "1010000000000111000000101",
+  "1000000000000010000000101",
+  "1110100000010010000001011",
+  "1000001000000010000000101",
+  "1011100000010010000111011",
+  "1000000000000010000000101",
+  "1011110000010010000111011",
   "1000000000000000000000101",
   "1011111111110111111110101",
   "1000000010001000000010001",
@@ -215,6 +218,21 @@ function hasLineOfSight(x0, y0, x1, y1) {
   return wallSegmentsOnLine(x0, y0, x1, y1) === 0;
 }
 
+function hasKillLineOfSight(x0, y0, x1, y1) {
+  if (hasLineOfSight(x0, y0, x1, y1)) return true;
+  const r = PLAYER_RADIUS * 0.85;
+  const offsets = [
+    [r, 0],
+    [-r, 0],
+    [0, r],
+    [0, -r],
+  ];
+  for (const [ox, oy] of offsets) {
+    if (hasLineOfSight(x0, y0, x1 + ox, y1 + oy)) return true;
+  }
+  return false;
+}
+
 function wallSegmentsOnLine(x0, y0, x1, y1) {
   const steps = Math.max(2, Math.ceil(dist(x0, y0, x1, y1) / (TILE / 4)));
   let segments = 0;
@@ -257,6 +275,26 @@ function tryDashFrom(p) {
 function getSpawn() {
   const i = Math.floor(Math.random() * SPAWN_POINTS.length);
   return SPAWN_POINTS[i];
+}
+
+function pickSpreadSpawns(playerCount) {
+  const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5);
+  const picked = [];
+
+  for (const pt of shuffled) {
+    const farEnough = picked.every(
+      (q) => dist(pt.x, pt.y, q.x, q.y) >= MIN_SPAWN_DIST
+    );
+    if (farEnough) picked.push(pt);
+    if (picked.length >= playerCount) return picked;
+  }
+
+  for (const pt of shuffled) {
+    if (picked.includes(pt)) continue;
+    picked.push(pt);
+    if (picked.length >= playerCount) break;
+  }
+  return picked;
 }
 
 function defaultSettings() {
@@ -323,10 +361,10 @@ function normalizeRoomCode(raw) {
   return digits.padStart(3, "0").slice(-3);
 }
 
-function initGameFields(p) {
-  const spawn = getSpawn();
-  p.x = spawn.x;
-  p.y = spawn.y;
+function initGameFields(p, spawn) {
+  const point = spawn || getSpawn();
+  p.x = point.x;
+  p.y = point.y;
   p.angle = 0;
   p.vx = 0;
   p.vy = 0;
@@ -342,6 +380,10 @@ function initGameFields(p) {
   p.disguiseName = null;
   p.disguiseColor = null;
   p.frozenUntil = 0;
+  p.resurrectOfferUntil = 0;
+  p.resurrectDeathX = 0;
+  p.resurrectDeathY = 0;
+  p.resurrectedThisRound = false;
   p.powerCooldownUntil = emptyPowerCooldowns();
   p.powers = mergePowers(p.powers);
   const fixed = pushCircleOutOfWalls(p.x, p.y, PLAYER_RADIUS);
@@ -435,6 +477,15 @@ function assignRoles(room) {
   }
 }
 
+function hasActiveResurrectOffer(room) {
+  const now = Date.now();
+  for (const p of room.players.values()) {
+    if (p.alive || p.role !== "innocent") continue;
+    if (p.resurrectOfferUntil > now) return true;
+  }
+  return false;
+}
+
 function checkGameEnd(room) {
   if (room.gameOver) return;
   if (room.startedAt && Date.now() - room.startedAt < 3000) return;
@@ -443,6 +494,7 @@ function checkGameEnd(room) {
   const now = Date.now();
 
   if (innocents === 0 && impostors > 0) {
+    if (hasActiveResurrectOffer(room)) return;
     room.gameOver = true;
     room.winner = "impostors";
     room.endReason = "Tous les innocents ont été éliminés.";
@@ -784,7 +836,7 @@ function tryRejoinPlayer(socket, room, name) {
   return true;
 }
 
-function startRoomGame(room) {
+function beginPlayingRound(room, rematch) {
   purgeOfflinePlayers(room);
   ensureRoomSettings(room);
   room.status = "playing";
@@ -794,17 +846,24 @@ function startRoomGame(room) {
   room.startedAt = Date.now();
   room.timerEndsAt = room.startedAt + room.settings.timerSec * 1000;
 
+  const active = [...room.players.values()].filter((p) => p.online !== false);
+  const spawns = pickSpreadSpawns(active.length);
+  let spawnIdx = 0;
   for (const p of room.players.values()) {
-    initGameFields(p);
+    if (p.online === false) continue;
+    initGameFields(p, spawns[spawnIdx] || getSpawn());
+    spawnIdx++;
   }
   assignRoles(room);
 
   for (const [id, p] of room.players) {
+    if (p.online === false) continue;
     const sock = io.sockets.sockets.get(id);
     if (sock) {
       sock.emit("gameStarted", {
         role: p.role,
         timerSec: room.settings.timerSec,
+        rematch: Boolean(rematch),
       });
     }
   }
@@ -813,19 +872,92 @@ function startRoomGame(room) {
   broadcastState(room);
 }
 
-function tryKill(room, killer) {
-  if (room.gameOver || killer.role !== "impostor" || !killer.alive) return;
-  const now = Date.now();
-  if (killer.frozenUntil > now) return;
-  if (now - killer.lastKill < KILL_COOLDOWN_MS) return;
+function startRoomGame(room) {
+  beginPlayingRound(room, false);
+}
 
+function clearResurrectOffer(p) {
+  if (!p) return;
+  p.resurrectOfferUntil = 0;
+}
+
+function scheduleResurrectOfferExpiry(room, playerId) {
+  setTimeout(() => {
+    const r = rooms.get(room.code);
+    if (!r || r.status !== "playing") return;
+    const p = r.players.get(playerId);
+    if (!p || p.alive) return;
+    const now = Date.now();
+    if (!p.resurrectOfferUntil || p.resurrectOfferUntil > now) return;
+    clearResurrectOffer(p);
+    const sock = io.sockets.sockets.get(playerId);
+    if (sock) sock.emit("resurrectOfferClosed", { reason: "expired" });
+    checkGameEnd(r);
+    broadcastState(r);
+  }, RESURRECT_OFFER_MS + 80);
+}
+
+function maybeOfferResurrect(room, victim) {
+  if (!victim || victim.role !== "innocent" || victim.resurrectedThisRound) return;
+  if (Math.random() >= RESURRECT_CHANCE) return;
+  const now = Date.now();
+  victim.resurrectDeathX = victim.x;
+  victim.resurrectDeathY = victim.y;
+  victim.resurrectOfferUntil = now + RESURRECT_OFFER_MS;
+  const sock = io.sockets.sockets.get(victim.id);
+  if (sock) {
+    sock.emit("resurrectOffer", { timeoutMs: RESURRECT_OFFER_MS });
+  }
+  scheduleResurrectOfferExpiry(room, victim.id);
+}
+
+function resurrectInnocent(room, p) {
+  const deathX = p.resurrectDeathX || p.x;
+  const deathY = p.resurrectDeathY || p.y;
+  let x = deathX;
+  let y = deathY;
+  if (circleOverlapsWall(x, y, PLAYER_RADIUS)) {
+    const sp = getSpawn();
+    x = sp.x;
+    y = sp.y;
+  }
+  const fixed = pushCircleOutOfWalls(x, y, PLAYER_RADIUS);
+  p.x = fixed.x;
+  p.y = fixed.y;
+  p.alive = true;
+  p.resurrectedThisRound = true;
+  clearResurrectOffer(p);
+  clearCombatBuffs(p);
+  if (room.gameOver) {
+    room.gameOver = false;
+    room.winner = null;
+    room.endReason = null;
+  }
+  io.to(room.code).emit("playerResurrected", {
+    playerId: p.id,
+    name: p.name,
+    x: p.x,
+    y: p.y,
+    color: p.color,
+  });
+  checkGameEnd(room);
+  broadcastState(room);
+}
+
+function tryKill(room, killer, fromKillButton = false) {
+  if (room.gameOver || killer.role !== "impostor" || !killer.alive) return false;
+  const now = Date.now();
+  if (killer.frozenUntil > now) return false;
+  if (now - killer.lastKill < KILL_COOLDOWN_MS) return false;
+
+  const range = fromKillButton ? KILL_RANGE + 10 : KILL_RANGE;
   let target = null;
-  let best = KILL_RANGE;
+  let best = range;
   for (const p of room.players.values()) {
     if (!p.alive || p.role !== "innocent" || p.id === killer.id) continue;
     const d = dist(killer.x, killer.y, p.x, p.y);
-    if (d > KILL_RANGE) continue;
-    if (!hasLineOfSight(killer.x, killer.y, p.x, p.y)) continue;
+    if (d > range) continue;
+    if (!hasKillLineOfSight(killer.x, killer.y, p.x, p.y)) continue;
     if (p.invisibleUntil > now) continue;
     if (d < best) {
       best = d;
@@ -833,11 +965,13 @@ function tryKill(room, killer) {
     }
   }
 
-  if (!target) return;
+  if (!target) return false;
   target.alive = false;
   clearCombatBuffs(target);
   killer.lastKill = now;
+  maybeOfferResurrect(room, target);
   checkGameEnd(room);
+  return true;
 }
 
 io.on("connection", (socket) => {
@@ -1000,6 +1134,22 @@ io.on("connection", (socket) => {
     startRoomGame(room);
   });
 
+  socket.on("rematchGame", () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.hostId !== socket.id) return;
+    if (!room.gameOver) return;
+    const online = countOnlinePlayers(room);
+    if (online < 2) {
+      socket.emit("errorMsg", { message: "Il faut au moins 2 joueurs pour relancer." });
+      return;
+    }
+    if (room.settings.impostors >= online) {
+      socket.emit("errorMsg", { message: "Trop d’imposteurs pour ce nombre de joueurs." });
+      return;
+    }
+    beginPlayingRound(room, true);
+  });
+
   socket.on("syncGame", () => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.status !== "playing") return;
@@ -1036,7 +1186,36 @@ io.on("connection", (socket) => {
     if (typeof data.angle === "number" && Number.isFinite(data.angle)) {
       p.angle = data.angle;
     }
-    if (data.kill) tryKill(room, p);
+    if (data.kill) tryKill(room, p, false);
+  });
+
+  socket.on("kill", () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing" || room.gameOver) return;
+    const p = room.players.get(socket.id);
+    if (!p || !p.alive || p.online === false) return;
+    if (tryKill(room, p, true)) broadcastState(room);
+  });
+
+  socket.on("resurrectChoice", (accept) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing") return;
+    const p = room.players.get(socket.id);
+    if (!p || p.alive || p.role !== "innocent") return;
+    const now = Date.now();
+    if (!p.resurrectOfferUntil || p.resurrectOfferUntil < now) {
+      socket.emit("resurrectResult", { ok: false, reason: "expired" });
+      return;
+    }
+    clearResurrectOffer(p);
+    if (accept === true) {
+      resurrectInnocent(room, p);
+      socket.emit("resurrectResult", { ok: true });
+      return;
+    }
+    socket.emit("resurrectResult", { ok: false, reason: "declined" });
+    checkGameEnd(room);
+    broadcastState(room);
   });
 
   socket.on("usePower", (powerId) => {

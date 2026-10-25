@@ -2,7 +2,12 @@
 <html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="theme-color" content="#0c0f14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <title>Labyrinthe — Imposteurs</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
@@ -42,6 +47,27 @@
           <li>Imposteur : bouton <strong>Tuer</strong> quand tu es tout près</li>
           <li>Tu ne vois pas à travers les murs</li>
         </ul>
+
+        <div class="comfort-block">
+          <h2 class="comfort-title">Confort &amp; son</h2>
+          <div class="comfort-row">
+            <label for="homeVolume">Volume</label>
+            <span id="homeVolumeVal" class="comfort-val">88%</span>
+          </div>
+          <input id="homeVolume" type="range" min="0" max="100" value="88" class="comfort-slider" />
+          <label class="check-label comfort-check" for="homeMute">
+            <input id="homeMute" type="checkbox" />
+            Couper le son
+          </label>
+          <label class="check-label comfort-check" for="homeVibrate">
+            <input id="homeVibrate" type="checkbox" checked />
+            Vibrations (téléphone)
+          </label>
+          <label class="check-label comfort-check" for="homeCalmMotion">
+            <input id="homeCalmMotion" type="checkbox" />
+            Moins d’animations (carte plus stable)
+          </label>
+        </div>
       </div>
 
       <div id="screenLobby" class="panel panel-wide hidden">
@@ -134,6 +160,9 @@
       <div id="screenControls" class="panel hidden">
         <h1>Comment tu joues ?</h1>
         <p class="tagline center">Choisis ton type d’appareil avant d’entrer dans le labyrinthe.</p>
+        <p id="controlMobileHint" class="tagline center small-hint hidden">
+          Sur téléphone, choisis <strong>Téléphone</strong> pour le joystick.
+        </p>
         <div class="control-choice">
           <button id="pickDesktop" type="button" class="control-card">
             <span class="control-icon">⌨️</span>
@@ -156,10 +185,33 @@
       <div id="aliveHud" class="pill dim">Innocents —</div>
     </header>
 
+    <div id="resurrectPrompt" class="resurrect-prompt hidden" role="dialog" aria-modal="true">
+      <div class="resurrect-card">
+        <h2>Seconde chance ?</h2>
+        <p class="tagline center">
+          Le labyrinthe t’offre une résurrection rare… Veux-tu revenir parmi les vivants ?
+        </p>
+        <p id="resurrectCountdown" class="resurrect-countdown">—</p>
+        <div class="resurrect-actions">
+          <button id="resurrectYes" type="button" class="btn-primary">Oui, ressusciter</button>
+          <button id="resurrectNo" type="button" class="btn-secondary">Non, rester mort</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="returnBanner" class="return-banner hidden" aria-live="polite">
+      <span class="return-banner-glow"></span>
+      <span id="returnBannerText">Un joueur est de retour</span>
+    </div>
+
     <div id="endScreen" class="end-screen hidden">
       <div class="end-card">
         <h2 id="endTitle">Partie terminée</h2>
         <p id="endMessage"></p>
+        <p id="endRematchWait" class="tagline center small-hint hidden">
+          L’hôte peut relancer la partie — tu seras remis en jeu automatiquement.
+        </p>
+        <button id="endRematchBtn" type="button" class="btn-primary hidden">Rejouer (hôte)</button>
         <button id="endHomeBtn" type="button" class="btn-secondary end-home-btn">Retour au menu</button>
       </div>
     </div>
@@ -174,9 +226,44 @@
       </div>
     </div>
 
+    <button id="comfortFab" type="button" class="comfort-fab hidden" aria-label="Réglages confort">
+      ⚙
+    </button>
+
+    <div id="comfortSheet" class="comfort-sheet hidden" role="dialog" aria-label="Réglages confort">
+      <div class="comfort-sheet-panel">
+        <div class="comfort-sheet-head">
+          <strong>Confort</strong>
+          <button id="comfortSheetClose" type="button" class="comfort-sheet-close" aria-label="Fermer">
+            ✕
+          </button>
+        </div>
+        <div class="comfort-row">
+          <label for="sheetVolume">Volume</label>
+          <span id="sheetVolumeVal" class="comfort-val">88%</span>
+        </div>
+        <input id="sheetVolume" type="range" min="0" max="100" value="88" class="comfort-slider" />
+        <label class="check-label comfort-check" for="sheetMute">
+          <input id="sheetMute" type="checkbox" />
+          Couper le son
+        </label>
+        <label class="check-label comfort-check" for="sheetVibrate">
+          <input id="sheetVibrate" type="checkbox" checked />
+          Vibrations
+        </label>
+        <label class="check-label comfort-check" for="sheetCalmMotion">
+          <input id="sheetCalmMotion" type="checkbox" />
+          Moins d’animations
+        </label>
+        <p class="small-hint comfort-sheet-hint">Réglages enregistrés sur cet appareil.</p>
+      </div>
+    </div>
+
     <canvas id="game"></canvas>
 
     <script src="/runtime-config.js"></script>
+    <script src="sfx.js"></script>
+    <script src="comfort.js"></script>
     <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
     <script src="game.js"></script>
   </body>
