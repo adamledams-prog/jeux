@@ -110,8 +110,33 @@ const POWER_ORDER = [
   "freeze",
 ];
 
-const JOIN_WAIT_MS = 8000;
-const socket = io({ reconnection: false });
+function isOnlineHosted() {
+  const h = window.location.hostname;
+  return h !== "localhost" && h !== "127.0.0.1";
+}
+
+const JOIN_WAIT_MS = isOnlineHosted() ? 25000 : 8000;
+
+const socket = io({
+  reconnection: isOnlineHosted(),
+  reconnectionAttempts: 15,
+  reconnectionDelay: 1500,
+  timeout: 25000,
+});
+
+function connectionHelpMessage() {
+  if (isOnlineHosted()) {
+    return "Connexion impossible pour l’instant. Sur Vercel le serveur peut mettre 10–20 s à démarrer : recharge la page puis réessaie.";
+  }
+  return "Pas de connexion au serveur. Lance npm start puis réessaie.";
+}
+
+function joinTimeoutMessage() {
+  if (isOnlineHosted()) {
+    return "Pas de réponse (serveur en ligne lent ou en veille). Recharge https://jeux-tawny.vercel.app et réessaie.";
+  }
+  return "Le serveur ne répond pas. Vérifie qu’il est lancé (npm start).";
+}
 let joinPending = null;
 let myId = null;
 let isHost = false;
@@ -494,7 +519,7 @@ function beginJoinAttempt() {
     joinPending = null;
     setHomeButtonsDisabled(false);
     if (phase === "home") {
-      showError(homeError, "Le serveur ne répond pas. Vérifie qu’il est lancé (npm start).");
+      showError(homeError, joinTimeoutMessage());
     }
   }, JOIN_WAIT_MS);
 }
@@ -502,7 +527,7 @@ function beginJoinAttempt() {
 createBtn.addEventListener("click", () => {
   hideErrors();
   if (!socket.connected) {
-    showError(homeError, "Pas de connexion au serveur. Lance npm start puis réessaie.");
+    showError(homeError, connectionHelpMessage());
     return;
   }
   beginJoinAttempt();
@@ -512,7 +537,7 @@ createBtn.addEventListener("click", () => {
 joinBtn.addEventListener("click", () => {
   hideErrors();
   if (!socket.connected) {
-    showError(homeError, "Pas de connexion au serveur. Lance npm start puis réessaie.");
+    showError(homeError, connectionHelpMessage());
     return;
   }
   const code = roomCodeInput.value.trim();

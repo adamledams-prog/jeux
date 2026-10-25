@@ -978,6 +978,10 @@ setInterval(() => {
   }
 }, TICK_MS);
 
-server.listen(PORT, () => {
-  console.log(`Labyrinthe multijoueur → http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  server.listen(PORT, () => {
+    console.log(`Labyrinthe multijoueur → http://localhost:${PORT}`);
+  });
+}
+
+module.exports = server;
