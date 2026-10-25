@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "node scripts/write-socket-config.js"
+    "build": "node scripts/write-socket-config.js",
+    "vercel-build": "node scripts/write-socket-config.js"
   },
   "dependencies": {
     "express": "^4.21.2",
