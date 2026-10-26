@@ -204,5 +204,21 @@ const Sfx = (() => {
       tone(440, 0.12, "sine", 0.04);
       setTimeout(() => tone(554, 0.16, "sine", 0.045), 120);
     },
+    wheelSpin() {
+      tone(200, 0.06, "triangle", 0.03);
+      setTimeout(() => tone(240, 0.06, "triangle", 0.028), 70);
+      setTimeout(() => tone(280, 0.06, "triangle", 0.026), 140);
+    },
+    wheelWin() {
+      tone(392, 0.12, "sine", 0.055);
+      tone(523, 0.14, "sine", 0.06, 0.1);
+      tone(659, 0.18, "triangle", 0.065, 0.22);
+      tone(784, 0.22, "triangle", 0.06, 0.36);
+    },
+    wheelLose() {
+      tone(196, 0.22, "sawtooth", 0.045);
+      tone(147, 0.32, "sawtooth", 0.04, 0.18);
+      sweep(180, 90, 0.28, "sawtooth", 0.035);
+    },
   };
 })();

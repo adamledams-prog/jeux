@@ -2,14 +2,14 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
+const { MAP_W, MAP_H, MAP_IDS, MAP_CATALOG, MAP_SPAWNS } = require("./maps");
 
 const PORT = process.env.PORT || 3000;
 const TICK_MS = 50;
-const MAP_W = 25;
-const MAP_H = 15;
 const TILE = 40;
 const PLAYER_RADIUS = 14;
 const PLAYER_SPEED = 180;
+const GHOST_SPEED_MULT = 3;
 const KILL_RANGE = 70;
 const MIN_SPAWN_DIST = TILE * 3.2;
 const KILL_COOLDOWN_MS = 25000;
@@ -23,8 +23,9 @@ const FREEZE_DURATION_MS = 2000;
 const POWER_USE_MIN_INTERVAL_MS = 150;
 const DASH_MIN_MOVE_PX = 6;
 const LOBBY_ROOM_MAX_AGE_MS = 45 * 60 * 1000;
-const RESURRECT_CHANCE = 0.28;
 const RESURRECT_OFFER_MS = 14000;
+const DOCTOR_WHEEL_ODDS = 1 / 3;
+const DOCTOR_WHEEL_SEGMENTS = 3;
 const POWER_IDS = [
   "portal",
   "invisible",
@@ -88,39 +89,62 @@ const COLOR_OPTIONS = [
   "#84cc16",
 ];
 
-const MAZE = [
-  "1111111111111111111111111",
-  "1000000010001000000010001",
-  "1011001010111010111010111",
-  "1000000000000000000000001",
-  "1010000000000111000000101",
-  "1000000000000010000000101",
-  "1110100000010010000001011",
-  "1000001000000010000000101",
-  "1011100000010010000111011",
-  "1000000000000010000000101",
-  "1011110000010010000111011",
-  "1000000000000000000000101",
-  "1011111111110111111110101",
-  "1000000010001000000010001",
-  "1111111111111111111111111",
-].map((row) => row.split("").map(Number));
+function tileAt(maze, tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return 1;
+  return maze[ty][tx];
+}
 
-const SPAWN_POINTS = [];
-for (let ty = 1; ty < MAP_H - 1; ty++) {
-  for (let tx = 1; tx < MAP_W - 1; tx++) {
-    if (MAZE[ty][tx] === 0) {
-      SPAWN_POINTS.push({ x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 });
+function getLobbyPreviewMapId(room) {
+  const leading = getLeadingMapVote(room);
+  if (leading) return leading;
+  return MAP_IDS[0];
+}
+
+function getRoomMaze(room) {
+  if (room.maze) return room.maze;
+  return MAP_CATALOG[getLobbyPreviewMapId(room)].maze;
+}
+
+function tallyMapVotes(room) {
+  const counts = {};
+  for (const id of MAP_IDS) counts[id] = 0;
+  const votes = room.mapVotes || {};
+  for (const mapId of Object.values(votes)) {
+    if (counts[mapId] !== undefined) counts[mapId]++;
+  }
+  return counts;
+}
+
+function getLeadingMapVote(room) {
+  const counts = tallyMapVotes(room);
+  let bestId = null;
+  let bestCount = 0;
+  const tied = [];
+  for (const id of MAP_IDS) {
+    const n = counts[id] || 0;
+    if (n > bestCount) {
+      bestCount = n;
+      bestId = id;
+      tied.length = 0;
+      tied.push(id);
+    } else if (n === bestCount && n > 0) {
+      tied.push(id);
     }
   }
+  if (bestCount === 0) return null;
+  if (tied.length > 1) {
+    return tied[Math.floor(Math.random() * tied.length)];
+  }
+  return bestId;
 }
 
-function tileAt(tx, ty) {
-  if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return 1;
-  return MAZE[ty][tx];
+function resolveMapVote(room) {
+  const leading = getLeadingMapVote(room);
+  if (leading) return leading;
+  return MAP_IDS[Math.floor(Math.random() * MAP_IDS.length)];
 }
 
-function circleOverlapsWall(cx, cy, r) {
+function circleOverlapsWall(maze, cx, cy, r) {
   const minTx = Math.floor((cx - r) / TILE);
   const maxTx = Math.floor((cx + r) / TILE);
   const minTy = Math.floor((cy - r) / TILE);
@@ -128,7 +152,7 @@ function circleOverlapsWall(cx, cy, r) {
 
   for (let ty = minTy; ty <= maxTy; ty++) {
     for (let tx = minTx; tx <= maxTx; tx++) {
-      if (tileAt(tx, ty) !== 1) continue;
+      if (tileAt(maze, tx, ty) !== 1) continue;
       const rx = tx * TILE;
       const ry = ty * TILE;
       const closestX = Math.max(rx, Math.min(cx, rx + TILE));
@@ -141,7 +165,7 @@ function circleOverlapsWall(cx, cy, r) {
   return false;
 }
 
-function pushCircleOutOfWalls(cx, cy, r) {
+function pushCircleOutOfWalls(maze, cx, cy, r) {
   let x = cx;
   let y = cy;
   for (let pass = 0; pass < 4; pass++) {
@@ -153,7 +177,7 @@ function pushCircleOutOfWalls(cx, cy, r) {
 
     for (let ty = minTy; ty <= maxTy; ty++) {
       for (let tx = minTx; tx <= maxTx; tx++) {
-        if (tileAt(tx, ty) !== 1) continue;
+        if (tileAt(maze, tx, ty) !== 1) continue;
         const rx = tx * TILE;
         const ry = ty * TILE;
         const closestX = Math.max(rx, Math.min(x, rx + TILE));
@@ -192,7 +216,17 @@ function pushCircleOutOfWalls(cx, cy, r) {
   return { x, y };
 }
 
-function moveCircle(x, y, dx, dy, r) {
+function moveGhost(x, y, dx, dy) {
+  const margin = PLAYER_RADIUS;
+  const maxX = MAP_W * TILE - margin;
+  const maxY = MAP_H * TILE - margin;
+  return {
+    x: Math.min(maxX, Math.max(margin, x + dx)),
+    y: Math.min(maxY, Math.max(margin, y + dy)),
+  };
+}
+
+function moveCircle(maze, x, y, dx, dy, r) {
   const dist = Math.hypot(dx, dy);
   const steps = Math.max(1, Math.ceil(dist / 6));
   const stepX = dx / steps;
@@ -200,10 +234,10 @@ function moveCircle(x, y, dx, dy, r) {
 
   for (let i = 0; i < steps; i++) {
     let nx = x + stepX;
-    if (!circleOverlapsWall(nx, y, r)) x = nx;
+    if (!circleOverlapsWall(maze, nx, y, r)) x = nx;
     let ny = y + stepY;
-    if (!circleOverlapsWall(x, ny, r)) y = ny;
-    const fixed = pushCircleOutOfWalls(x, y, r);
+    if (!circleOverlapsWall(maze, x, ny, r)) y = ny;
+    const fixed = pushCircleOutOfWalls(maze, x, y, r);
     x = fixed.x;
     y = fixed.y;
   }
@@ -214,12 +248,12 @@ function dist(ax, ay, bx, by) {
   return Math.hypot(ax - bx, ay - by);
 }
 
-function hasLineOfSight(x0, y0, x1, y1) {
-  return wallSegmentsOnLine(x0, y0, x1, y1) === 0;
+function hasLineOfSight(maze, x0, y0, x1, y1) {
+  return wallSegmentsOnLine(maze, x0, y0, x1, y1) === 0;
 }
 
-function hasKillLineOfSight(x0, y0, x1, y1) {
-  if (hasLineOfSight(x0, y0, x1, y1)) return true;
+function hasKillLineOfSight(maze, x0, y0, x1, y1) {
+  if (hasLineOfSight(maze, x0, y0, x1, y1)) return true;
   const r = PLAYER_RADIUS * 0.85;
   const offsets = [
     [r, 0],
@@ -228,12 +262,12 @@ function hasKillLineOfSight(x0, y0, x1, y1) {
     [0, -r],
   ];
   for (const [ox, oy] of offsets) {
-    if (hasLineOfSight(x0, y0, x1 + ox, y1 + oy)) return true;
+    if (hasLineOfSight(maze, x0, y0, x1 + ox, y1 + oy)) return true;
   }
   return false;
 }
 
-function wallSegmentsOnLine(x0, y0, x1, y1) {
+function wallSegmentsOnLine(maze, x0, y0, x1, y1) {
   const steps = Math.max(2, Math.ceil(dist(x0, y0, x1, y1) / (TILE / 4)));
   let segments = 0;
   let insideWall = false;
@@ -243,7 +277,7 @@ function wallSegmentsOnLine(x0, y0, x1, y1) {
     const y = y0 + (y1 - y0) * t;
     const tx = Math.floor(x / TILE);
     const ty = Math.floor(y / TILE);
-    const wall = tileAt(tx, ty) === 1;
+    const wall = tileAt(maze, tx, ty) === 1;
     if (wall && !insideWall) {
       segments++;
       insideWall = true;
@@ -254,7 +288,8 @@ function wallSegmentsOnLine(x0, y0, x1, y1) {
   return segments;
 }
 
-function tryDashFrom(p) {
+function tryDashFrom(room, p) {
+  const maze = getRoomMaze(room);
   let dx = p.vx;
   let dy = p.vy;
   const vlen = Math.hypot(dx, dy);
@@ -265,20 +300,24 @@ function tryDashFrom(p) {
     dx /= vlen;
     dy /= vlen;
   }
-  const moved = moveCircle(p.x, p.y, dx * DASH_DISTANCE, dy * DASH_DISTANCE, PLAYER_RADIUS);
+  const moved = moveCircle(maze, p.x, p.y, dx * DASH_DISTANCE, dy * DASH_DISTANCE, PLAYER_RADIUS);
   p.x = moved.x;
   p.y = moved.y;
   p.vx = 0;
   p.vy = 0;
 }
 
-function getSpawn() {
-  const i = Math.floor(Math.random() * SPAWN_POINTS.length);
-  return SPAWN_POINTS[i];
+function spawnPointsForMap(mapId) {
+  return MAP_SPAWNS[mapId] || MAP_SPAWNS[MAP_IDS[0]];
 }
 
-function pickSpreadSpawns(playerCount) {
-  const shuffled = [...SPAWN_POINTS].sort(() => Math.random() - 0.5);
+function getSpawn(mapId) {
+  const pts = spawnPointsForMap(mapId);
+  return pts[Math.floor(Math.random() * pts.length)];
+}
+
+function pickSpreadSpawns(mapId, playerCount) {
+  const shuffled = [...spawnPointsForMap(mapId)].sort(() => Math.random() - 0.5);
   const picked = [];
 
   for (const pt of shuffled) {
@@ -303,7 +342,16 @@ function defaultSettings() {
     timerSec: 120,
     powersEnabled: true,
     powerCooldownSec: defaultPowerCooldownSec(),
+    roomPowers: defaultPowers(),
   };
+}
+
+function syncAllPlayerPowers(room) {
+  ensureRoomSettings(room);
+  const powers = mergePowers(room.settings.roomPowers);
+  for (const p of room.players.values()) {
+    p.powers = { ...powers };
+  }
 }
 
 function pickFreeColor(room) {
@@ -331,21 +379,28 @@ function uniqueNameInRoom(room, requested) {
 }
 
 function lobbyPlayer(id, name, room) {
+  ensureRoomSettings(room);
   return {
     id,
     name: uniqueNameInRoom(room, name),
     color: pickFreeColor(room),
-    powers: defaultPowers(),
+    powers: mergePowers(room.settings.roomPowers),
   };
 }
 
 function lobbyPayload(room) {
   ensureRoomSettings(room);
+  const previewId = getLobbyPreviewMapId(room);
+  const previewMaze = MAP_CATALOG[previewId].maze;
   return {
     code: room.code,
     hostId: room.hostId,
     status: room.status,
     settings: room.settings,
+    mapOptions: MAP_IDS.map((id) => ({ id, name: MAP_CATALOG[id].name })),
+    mapVoteCounts: tallyMapVotes(room),
+    mapVotes: { ...(room.mapVotes || {}) },
+    mapPreview: { w: MAP_W, h: MAP_H, maze: previewMaze, id: previewId },
     players: [...room.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
@@ -361,8 +416,8 @@ function normalizeRoomCode(raw) {
   return digits.padStart(3, "0").slice(-3);
 }
 
-function initGameFields(p, spawn) {
-  const point = spawn || getSpawn();
+function initGameFields(p, spawn, maze, mapId) {
+  const point = spawn || getSpawn(mapId);
   p.x = point.x;
   p.y = point.y;
   p.angle = 0;
@@ -384,9 +439,17 @@ function initGameFields(p, spawn) {
   p.resurrectDeathX = 0;
   p.resurrectDeathY = 0;
   p.resurrectedThisRound = false;
+  p.resurrectWheelUsed = false;
+  p.resurrectWheelOdds = 0;
+  p.specialRole = "nul";
+  p.doctorTargetId = null;
+  p.doctorProtected = false;
+  p.doctorReviveUsed = false;
+  p.corpseX = 0;
+  p.corpseY = 0;
   p.powerCooldownUntil = emptyPowerCooldowns();
   p.powers = mergePowers(p.powers);
-  const fixed = pushCircleOutOfWalls(p.x, p.y, PLAYER_RADIUS);
+  const fixed = pushCircleOutOfWalls(maze, p.x, p.y, PLAYER_RADIUS);
   p.x = fixed.x;
   p.y = fixed.y;
 }
@@ -454,6 +517,7 @@ function ensureRoomSettings(room) {
     timerSec: TIMER_OPTIONS.includes(timerSec) ? timerSec : 120,
     powersEnabled,
     powerCooldownSec: cds,
+    roomPowers: mergePowers(room.settings?.roomPowers),
   };
 }
 
@@ -470,11 +534,36 @@ function assignRoles(room) {
   const shuffled = [...ids].sort(() => Math.random() - 0.5);
   for (const p of room.players.values()) {
     p.role = "innocent";
+    p.specialRole = "nul";
+    p.doctorTargetId = null;
+    p.doctorProtected = false;
+    p.doctorReviveUsed = false;
   }
   for (let i = 0; i < maxImpostors; i++) {
     const player = room.players.get(shuffled[i]);
     if (player) player.role = "impostor";
   }
+  assignSpecialRoles(room);
+}
+
+function assignSpecialRoles(room) {
+  const innocents = [...room.players.values()].filter((p) => p.role === "innocent");
+  const pool = [...innocents].sort(() => Math.random() - 0.5);
+  if (pool.length >= 1) pool[0].specialRole = "inspecteur";
+  if (pool.length >= 3) pool[1].specialRole = "medecin";
+}
+
+function gameStartedPayload(room, p, rematch) {
+  return {
+    role: p.role,
+    specialRole: p.specialRole || "nul",
+    doctorPickDone: p.specialRole === "medecin" ? Boolean(p.doctorTargetId) : false,
+    doctorProtected: p.role === "innocent" ? Boolean(p.doctorProtected) : false,
+    timerSec: room.settings.timerSec,
+    rematch: Boolean(rematch),
+    mapId: room.playMapId,
+    mapName: room.playMapId ? MAP_CATALOG[room.playMapId].name : undefined,
+  };
 }
 
 function hasActiveResurrectOffer(room) {
@@ -609,6 +698,8 @@ function publicPlayer(p, now = Date.now()) {
     frozen: p.frozenUntil > now,
     portal: p.portal ? { x: p.portal.x, y: p.portal.y } : null,
     powerCooldownMs: buildPowerCooldownMap(p, now),
+    corpseX: p.alive ? null : p.corpseX ?? p.x,
+    corpseY: p.alive ? null : p.corpseY ?? p.y,
   };
 }
 
@@ -636,16 +727,18 @@ function usePlayerPower(room, p, powerId) {
     return { ok: false, reason: "spam" };
   }
 
+  const maze = getRoomMaze(room);
+
   if (powerId === "portal") {
     if (!p.portal) {
-      if (circleOverlapsWall(p.x, p.y, PLAYER_RADIUS)) {
+      if (circleOverlapsWall(maze, p.x, p.y, PLAYER_RADIUS)) {
         return { ok: false, reason: "bad_place" };
       }
       p.portal = { x: p.x, y: p.y };
       applyPowerCooldown(p, powerId, now, room);
       return { ok: true, powerId, action: "place" };
     }
-    const dest = pushCircleOutOfWalls(p.portal.x, p.portal.y, PLAYER_RADIUS);
+    const dest = pushCircleOutOfWalls(maze, p.portal.x, p.portal.y, PLAYER_RADIUS);
     p.x = dest.x;
     p.y = dest.y;
     p.vx = 0;
@@ -676,7 +769,7 @@ function usePlayerPower(room, p, powerId) {
   if (powerId === "dash") {
     const ox = p.x;
     const oy = p.y;
-    tryDashFrom(p);
+    tryDashFrom(room, p);
     const moved = dist(ox, oy, p.x, p.y);
     if (moved < DASH_MIN_MOVE_PX) {
       p.vx = 0;
@@ -746,7 +839,7 @@ function broadcastState(room) {
   io.to(room.code).emit("state", {
     status: room.status,
     players,
-    map: { w: MAP_W, h: MAP_H, tile: TILE, maze: MAZE },
+    map: { w: MAP_W, h: MAP_H, tile: TILE, maze: getRoomMaze(room), mapId: room.playMapId || null },
     timeLeftMs,
     gameOver: room.gameOver,
     winner: room.winner,
@@ -786,6 +879,7 @@ function handleDisconnect(socket) {
 
 function removePlayerFromRoom(room, playerId) {
   room.players.delete(playerId);
+  if (room.mapVotes) delete room.mapVotes[playerId];
   if (room.players.size === 0) {
     rooms.delete(room.code);
     return;
@@ -828,10 +922,7 @@ function tryRejoinPlayer(socket, room, name) {
     isHost: room.hostId === socket.id,
     lobby: lobbyPayload(room),
   });
-  socket.emit("gameStarted", {
-    role: p.role,
-    timerSec: room.settings.timerSec,
-  });
+  socket.emit("gameStarted", gameStartedPayload(room, p, false));
   broadcastState(room);
   return true;
 }
@@ -839,6 +930,8 @@ function tryRejoinPlayer(socket, room, name) {
 function beginPlayingRound(room, rematch) {
   purgeOfflinePlayers(room);
   ensureRoomSettings(room);
+  room.playMapId = resolveMapVote(room);
+  room.maze = MAP_CATALOG[room.playMapId].maze;
   room.status = "playing";
   room.gameOver = false;
   room.winner = null;
@@ -847,11 +940,16 @@ function beginPlayingRound(room, rematch) {
   room.timerEndsAt = room.startedAt + room.settings.timerSec * 1000;
 
   const active = [...room.players.values()].filter((p) => p.online !== false);
-  const spawns = pickSpreadSpawns(active.length);
+  const spawns = pickSpreadSpawns(room.playMapId, active.length);
   let spawnIdx = 0;
   for (const p of room.players.values()) {
     if (p.online === false) continue;
-    initGameFields(p, spawns[spawnIdx] || getSpawn());
+    initGameFields(
+      p,
+      spawns[spawnIdx] || getSpawn(room.playMapId),
+      room.maze,
+      room.playMapId
+    );
     spawnIdx++;
   }
   assignRoles(room);
@@ -860,11 +958,7 @@ function beginPlayingRound(room, rematch) {
     if (p.online === false) continue;
     const sock = io.sockets.sockets.get(id);
     if (sock) {
-      sock.emit("gameStarted", {
-        role: p.role,
-        timerSec: room.settings.timerSec,
-        rematch: Boolean(rematch),
-      });
+      sock.emit("gameStarted", gameStartedPayload(room, p, rematch));
     }
   }
 
@@ -879,6 +973,7 @@ function startRoomGame(room) {
 function clearResurrectOffer(p) {
   if (!p) return;
   p.resurrectOfferUntil = 0;
+  p.resurrectWheelUsed = false;
 }
 
 function scheduleResurrectOfferExpiry(room, playerId) {
@@ -899,33 +994,46 @@ function scheduleResurrectOfferExpiry(room, playerId) {
 
 function maybeOfferResurrect(room, victim) {
   if (!victim || victim.role !== "innocent" || victim.resurrectedThisRound) return;
-  if (Math.random() >= RESURRECT_CHANCE) return;
+  if (!victim.doctorProtected || victim.doctorReviveUsed) return;
   const now = Date.now();
-  victim.resurrectDeathX = victim.x;
-  victim.resurrectDeathY = victim.y;
+  victim.resurrectWheelUsed = false;
+  victim.resurrectWheelOdds = DOCTOR_WHEEL_ODDS;
+  victim.resurrectDeathX = victim.corpseX ?? victim.x;
+  victim.resurrectDeathY = victim.corpseY ?? victim.y;
   victim.resurrectOfferUntil = now + RESURRECT_OFFER_MS;
   const sock = io.sockets.sockets.get(victim.id);
   if (sock) {
-    sock.emit("resurrectOffer", { timeoutMs: RESURRECT_OFFER_MS });
+    sock.emit("resurrectOffer", {
+      timeoutMs: RESURRECT_OFFER_MS,
+      mode: "doctor",
+      segments: DOCTOR_WHEEL_SEGMENTS,
+      oddsLabel: "1/3",
+    });
   }
   scheduleResurrectOfferExpiry(room, victim.id);
 }
 
 function resurrectInnocent(room, p) {
-  const deathX = p.resurrectDeathX || p.x;
-  const deathY = p.resurrectDeathY || p.y;
+  const deathX = p.resurrectDeathX || p.corpseX || p.x;
+  const deathY = p.resurrectDeathY || p.corpseY || p.y;
   let x = deathX;
   let y = deathY;
-  if (circleOverlapsWall(x, y, PLAYER_RADIUS)) {
-    const sp = getSpawn();
+  const maze = getRoomMaze(room);
+  const mapId = room.playMapId || MAP_IDS[0];
+  if (circleOverlapsWall(maze, x, y, PLAYER_RADIUS)) {
+    const sp = getSpawn(mapId);
     x = sp.x;
     y = sp.y;
   }
-  const fixed = pushCircleOutOfWalls(x, y, PLAYER_RADIUS);
+  const fixed = pushCircleOutOfWalls(maze, x, y, PLAYER_RADIUS);
   p.x = fixed.x;
   p.y = fixed.y;
   p.alive = true;
+  p.corpseX = 0;
+  p.corpseY = 0;
   p.resurrectedThisRound = true;
+  p.doctorReviveUsed = true;
+  p.doctorProtected = false;
   clearResurrectOffer(p);
   clearCombatBuffs(p);
   if (room.gameOver) {
@@ -950,6 +1058,7 @@ function tryKill(room, killer, fromKillButton = false) {
   if (killer.frozenUntil > now) return false;
   if (now - killer.lastKill < KILL_COOLDOWN_MS) return false;
 
+  const maze = getRoomMaze(room);
   const range = fromKillButton ? KILL_RANGE + 10 : KILL_RANGE;
   let target = null;
   let best = range;
@@ -957,7 +1066,7 @@ function tryKill(room, killer, fromKillButton = false) {
     if (!p.alive || p.role !== "innocent" || p.id === killer.id) continue;
     const d = dist(killer.x, killer.y, p.x, p.y);
     if (d > range) continue;
-    if (!hasKillLineOfSight(killer.x, killer.y, p.x, p.y)) continue;
+    if (!hasKillLineOfSight(maze, killer.x, killer.y, p.x, p.y)) continue;
     if (p.invisibleUntil > now) continue;
     if (d < best) {
       best = d;
@@ -966,7 +1075,11 @@ function tryKill(room, killer, fromKillButton = false) {
   }
 
   if (!target) return false;
+  target.corpseX = target.x;
+  target.corpseY = target.y;
   target.alive = false;
+  target.vx = 0;
+  target.vy = 0;
   clearCombatBuffs(target);
   killer.lastKill = now;
   maybeOfferResurrect(room, target);
@@ -1000,6 +1113,9 @@ io.on("connection", (socket) => {
       endReason: null,
       timerEndsAt: 0,
       createdAt: Date.now(),
+      mapVotes: {},
+      playMapId: null,
+      maze: null,
     };
     room.players.set(socket.id, lobbyPlayer(socket.id, name, room));
     rooms.set(code, room);
@@ -1085,20 +1201,35 @@ io.on("connection", (socket) => {
   socket.on("setPowers", (powers) => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.status !== "lobby") return;
-    ensureRoomSettings(room);
-    if (!room.settings.powersEnabled) {
-      socket.emit("errorMsg", { message: "Les pouvoirs sont désactivés par l’hôte." });
+    if (room.hostId !== socket.id) {
+      socket.emit("errorMsg", { message: "Seul l’hôte choisit les pouvoirs de la partie." });
       return;
     }
-    const p = room.players.get(socket.id);
-    if (!p) return;
+    ensureRoomSettings(room);
+    if (!room.settings.powersEnabled) {
+      socket.emit("errorMsg", { message: "Les pouvoirs sont désactivés pour cette partie." });
+      return;
+    }
     const next = mergePowers(powers);
     const anyOn = POWER_IDS.some((id) => next[id]);
     if (!anyOn) {
-      socket.emit("errorMsg", { message: "Équipe au moins un pouvoir." });
+      socket.emit("errorMsg", { message: "Équipe au moins un pouvoir pour la partie." });
       return;
     }
-    p.powers = next;
+    room.settings.roomPowers = next;
+    syncAllPlayerPowers(room);
+    broadcastLobby(room);
+  });
+
+  socket.on("voteMap", (mapId) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "lobby") return;
+    if (!MAP_IDS.includes(mapId)) {
+      socket.emit("errorMsg", { message: "Carte invalide." });
+      return;
+    }
+    if (!room.mapVotes) room.mapVotes = {};
+    room.mapVotes[socket.id] = mapId;
     broadcastLobby(room);
   });
 
@@ -1155,31 +1286,75 @@ io.on("connection", (socket) => {
     if (!room || room.status !== "playing") return;
     const p = room.players.get(socket.id);
     if (!p) return;
-    socket.emit("gameStarted", {
-      role: p.role,
-      timerSec: room.settings.timerSec,
-    });
+    socket.emit("gameStarted", gameStartedPayload(room, p, false));
     broadcastState(room);
+  });
+
+  socket.on("doctorSelect", (targetId) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing" || room.gameOver) return;
+    const p = room.players.get(socket.id);
+    if (!p || !p.alive || p.online === false || p.specialRole !== "medecin") {
+      socket.emit("doctorSelectResult", { ok: false, reason: "not_medecin" });
+      return;
+    }
+    if (p.doctorTargetId) {
+      socket.emit("doctorSelectResult", { ok: false, reason: "already_picked" });
+      return;
+    }
+    const target = room.players.get(targetId);
+    if (
+      !target ||
+      !target.alive ||
+      target.role !== "innocent" ||
+      target.id === p.id ||
+      target.online === false
+    ) {
+      socket.emit("doctorSelectResult", { ok: false, reason: "invalid_target" });
+      return;
+    }
+    p.doctorTargetId = target.id;
+    target.doctorProtected = true;
+    socket.emit("doctorSelectResult", {
+      ok: true,
+      targetId: target.id,
+      targetName: target.name,
+    });
+    const targetSock = io.sockets.sockets.get(target.id);
+    if (targetSock) {
+      targetSock.emit("doctorProtected", {
+        message:
+          "Le médecin t’a protégé — si tu meurs : 1 chance sur 3 de revivre (une fois).",
+      });
+    }
   });
 
   socket.on("input", (data) => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.status !== "playing" || room.gameOver) return;
     const p = room.players.get(socket.id);
-    if (!p || !p.alive || p.online === false) return;
-    const now = Date.now();
-    if (p.frozenUntil > now) {
-      p.vx = 0;
-      p.vy = 0;
-      if (typeof data.angle === "number") p.angle = data.angle;
-      return;
-    }
+    if (!p || p.online === false) return;
     let vx = Number(data.vx) || 0;
     let vy = Number(data.vy) || 0;
     const vlen = Math.hypot(vx, vy);
     if (vlen > 1) {
       vx /= vlen;
       vy /= vlen;
+    }
+    if (!p.alive) {
+      p.vx = vx;
+      p.vy = vy;
+      if (typeof data.angle === "number" && Number.isFinite(data.angle)) {
+        p.angle = data.angle;
+      }
+      return;
+    }
+    const now = Date.now();
+    if (p.frozenUntil > now) {
+      p.vx = 0;
+      p.vy = 0;
+      if (typeof data.angle === "number") p.angle = data.angle;
+      return;
     }
     p.vx = vx;
     p.vy = vy;
@@ -1207,12 +1382,28 @@ io.on("connection", (socket) => {
       socket.emit("resurrectResult", { ok: false, reason: "expired" });
       return;
     }
-    clearResurrectOffer(p);
     if (accept === true) {
-      resurrectInnocent(room, p);
-      socket.emit("resurrectResult", { ok: true });
+      if (p.resurrectWheelUsed) {
+        socket.emit("resurrectResult", { ok: false, reason: "already_spun" });
+        return;
+      }
+      p.resurrectWheelUsed = true;
+      const odds = p.resurrectWheelOdds > 0 ? p.resurrectWheelOdds : DOCTOR_WHEEL_ODDS;
+      const won = Math.random() < odds;
+      if (won) {
+        resurrectInnocent(room, p);
+        socket.emit("resurrectResult", { ok: true, won: true });
+        return;
+      }
+      p.doctorReviveUsed = true;
+      p.doctorProtected = false;
+      clearResurrectOffer(p);
+      socket.emit("resurrectResult", { ok: false, won: false, reason: "unlucky" });
+      checkGameEnd(room);
+      broadcastState(room);
       return;
     }
+    clearResurrectOffer(p);
     socket.emit("resurrectResult", { ok: false, reason: "declined" });
     checkGameEnd(room);
     broadcastState(room);
@@ -1243,7 +1434,16 @@ function updatePlayers(room, dt) {
   const now = Date.now();
   for (const p of room.players.values()) {
     expireTimedBuffs(p, now);
-    if (!isPlayerActive(p) || !p.alive) continue;
+    if (!isPlayerActive(p)) continue;
+    if (!p.alive) {
+      const speed = PLAYER_SPEED * GHOST_SPEED_MULT;
+      const dx = p.vx * speed * dt;
+      const dy = p.vy * speed * dt;
+      const moved = moveGhost(p.x, p.y, dx, dy);
+      p.x = moved.x;
+      p.y = moved.y;
+      continue;
+    }
     if (p.frozenUntil > now) {
       p.vx = 0;
       p.vy = 0;
@@ -1253,7 +1453,8 @@ function updatePlayers(room, dt) {
     if (p.speedUntil > now) speed *= SPEED_BOOST_MULT;
     const dx = p.vx * speed * dt;
     const dy = p.vy * speed * dt;
-    const moved = moveCircle(p.x, p.y, dx, dy, PLAYER_RADIUS);
+    const maze = getRoomMaze(room);
+    const moved = moveCircle(maze, p.x, p.y, dx, dy, PLAYER_RADIUS);
     p.x = moved.x;
     p.y = moved.y;
   }

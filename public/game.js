@@ -47,11 +47,31 @@ const powerPicker = document.getElementById("powerPicker");
 const powerBar = document.getElementById("powerBar");
 const resurrectPrompt = document.getElementById("resurrectPrompt");
 const resurrectCountdown = document.getElementById("resurrectCountdown");
-const resurrectYes = document.getElementById("resurrectYes");
+const resurrectWheel = document.getElementById("resurrectWheel");
+const resurrectSpinBtn = document.getElementById("resurrectSpinBtn");
+const resurrectWheelMsg = document.getElementById("resurrectWheelMsg");
 const resurrectNo = document.getElementById("resurrectNo");
+const resurrectTitle = document.getElementById("resurrectTitle");
+const resurrectHint = document.getElementById("resurrectHint");
+const wheelCenterCap = document.getElementById("wheelCenterCap");
+const wheelLegendWin = document.getElementById("wheelLegendWin");
+const wheelLegendLose = document.getElementById("wheelLegendLose");
+const doctorPicker = document.getElementById("doctorPicker");
+const doctorTargetList = document.getElementById("doctorTargetList");
+const doctorPickerClose = document.getElementById("doctorPickerClose");
 const returnBanner = document.getElementById("returnBanner");
 const returnBannerText = document.getElementById("returnBannerText");
+const deathBanner = document.getElementById("deathBanner");
+const deathBannerText = document.getElementById("deathBannerText");
 const controlMobileHint = document.getElementById("controlMobileHint");
+const lobbyMapPreview = document.getElementById("lobbyMapPreview");
+const lobbyMapLabel = document.getElementById("lobbyMapLabel");
+const mapVotePicker = document.getElementById("mapVotePicker");
+const copyCodeBtn = document.getElementById("copyCodeBtn");
+const lobbyMeta = document.getElementById("lobbyMeta");
+
+const MAP_VOTE_ICONS = { croise: "✚", serpent: "〰️", anneaux: "◎" };
+const playerCountBadge = document.getElementById("playerCountBadge");
 const comfortFab = document.getElementById("comfortFab");
 const comfortSheet = document.getElementById("comfortSheet");
 const comfortSheetClose = document.getElementById("comfortSheetClose");
@@ -296,6 +316,10 @@ let myId = null;
 let isHost = false;
 let roomCode = null;
 let myRole = null;
+let mySpecialRole = "nul";
+let myDoctorPickDone = false;
+let iHaveDoctorProtection = false;
+let doctorPatientName = null;
 let myColor = COLOR_OPTIONS[0];
 let phase = "home";
 let state = null;
@@ -462,6 +486,11 @@ function resetSession() {
   isHost = false;
   roomCode = null;
   myRole = null;
+  mySpecialRole = "nul";
+  myDoctorPickDone = false;
+  iHaveDoctorProtection = false;
+  doctorPatientName = null;
+  hideDoctorPicker();
   myColor = COLOR_OPTIONS[0];
   state = null;
   lobbyData = null;
@@ -503,19 +532,170 @@ function updatePowerLobbySection() {
   powerPickerSection.classList.toggle("disabled", !enabled);
   powerPickerHint.classList.toggle("hidden", !enabled);
   powerDisabledMsg.classList.toggle("hidden", enabled);
+  powerPicker.classList.toggle("powers-read-only", !isHost);
+  if (enabled) {
+    powerPickerHint.textContent = isHost
+      ? "Choisis les pouvoirs — ils seront les mêmes pour tous les joueurs."
+      : "Pouvoirs choisis par l’hôte pour toute la partie (lecture seule).";
+  }
   if (!enabled) {
     powerCooldownInfo.classList.add("hidden");
     return;
   }
-  if (!isHost && cds) {
-    const parts = POWER_ORDER.map((id) => {
+  if (cds) {
+    const parts = POWER_ORDER.filter((id) => myPowers[id]).map((id) => {
+      const def = POWER_CATALOG[id];
+      return `${def.emoji} ${def.name}`;
+    });
+    const cdParts = POWER_ORDER.map((id) => {
       const def = POWER_CATALOG[id];
       return `${def.name.toLowerCase()} ${cds[id] ?? 20}s`;
     });
-    powerCooldownInfo.textContent = `Recharge : ${parts.join(" · ")}`;
-    powerCooldownInfo.classList.remove("hidden");
+    if (!isHost) {
+      powerCooldownInfo.textContent = parts.length
+        ? `Actifs : ${parts.join(" · ")} — recharge ${cdParts.join(" · ")}`
+        : `Recharge : ${cdParts.join(" · ")}`;
+      powerCooldownInfo.classList.remove("hidden");
+    } else {
+      powerCooldownInfo.classList.add("hidden");
+    }
   } else {
     powerCooldownInfo.classList.add("hidden");
+  }
+}
+
+function drawLobbyMapPreview(preview) {
+  if (!lobbyMapPreview || !preview?.maze?.length) return;
+  const pctx = lobbyMapPreview.getContext("2d");
+  if (!pctx) return;
+  const { w, h, maze } = preview;
+  const pad = 6;
+  const cell = Math.max(2, Math.floor(Math.min((220 - pad * 2) / w, (132 - pad * 2) / h)));
+  const drawW = w * cell;
+  const drawH = h * cell;
+  lobbyMapPreview.width = drawW + pad * 2;
+  lobbyMapPreview.height = drawH + pad * 2;
+
+  pctx.fillStyle = "#06080c";
+  pctx.fillRect(0, 0, lobbyMapPreview.width, lobbyMapPreview.height);
+
+  for (let ty = 0; ty < h; ty++) {
+    for (let tx = 0; tx < w; tx++) {
+      const x = pad + tx * cell;
+      const y = pad + ty * cell;
+      const wall = maze[ty][tx] === 1;
+      if (wall) {
+        pctx.fillStyle = "#2d3a52";
+        pctx.fillRect(x, y, cell, cell);
+        pctx.fillStyle = "rgba(120, 160, 220, 0.35)";
+        pctx.fillRect(x, y, cell, Math.max(1, Math.floor(cell / 3)));
+      } else {
+        pctx.fillStyle = "#1a2838";
+        pctx.fillRect(x, y, cell, cell);
+        pctx.fillStyle = "rgba(34, 211, 238, 0.25)";
+        pctx.fillRect(x + cell * 0.35, y + cell * 0.35, cell * 0.3, cell * 0.3);
+      }
+    }
+  }
+
+  pctx.strokeStyle = "rgba(34, 211, 238, 0.35)";
+  pctx.lineWidth = 1;
+  pctx.strokeRect(pad + 0.5, pad + 0.5, drawW - 1, drawH - 1);
+}
+
+async function copyRoomCode() {
+  if (!roomCode || !copyCodeBtn) return;
+  const text = String(roomCode);
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    copyCodeBtn.textContent = "Copié !";
+    copyCodeBtn.classList.add("copied");
+    setTimeout(() => {
+      copyCodeBtn.textContent = "Copier";
+      copyCodeBtn.classList.remove("copied");
+    }, 1600);
+    haptic("tap");
+  } catch {
+    copyCodeBtn.textContent = "Échec";
+    setTimeout(() => {
+      copyCodeBtn.textContent = "Copier";
+    }, 1600);
+  }
+}
+
+if (copyCodeBtn) {
+  copyCodeBtn.addEventListener("click", () => {
+    Sfx?.unlock();
+    copyRoomCode();
+  });
+}
+
+function myMapVoteId() {
+  return lobbyData?.mapVotes?.[myId] || null;
+}
+
+function updateMapVoteUi() {
+  if (!mapVotePicker) return;
+  const options = lobbyData?.mapOptions || [];
+  const counts = lobbyData?.mapVoteCounts || {};
+  const mine = myMapVoteId();
+  const playing = lobbyData?.status === "playing";
+  let maxVotes = 0;
+  for (const opt of options) {
+    const n = counts[opt.id] || 0;
+    if (n > maxVotes) maxVotes = n;
+  }
+
+  mapVotePicker.innerHTML = "";
+  for (const opt of options) {
+    const n = counts[opt.id] || 0;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "map-vote-btn";
+    btn.dataset.mapId = opt.id;
+    if (mine === opt.id) btn.classList.add("selected");
+    if (maxVotes > 0 && n === maxVotes) btn.classList.add("leading");
+    btn.disabled = playing;
+
+    const icon = document.createElement("span");
+    icon.className = "map-vote-icon";
+    icon.textContent = MAP_VOTE_ICONS[opt.id] || "🗺️";
+    btn.appendChild(icon);
+
+    const name = document.createElement("span");
+    name.className = "map-vote-name";
+    name.textContent = opt.name;
+    btn.appendChild(name);
+
+    const count = document.createElement("span");
+    count.className = "map-vote-count";
+    count.textContent = n === 1 ? "1 vote" : `${n} votes`;
+    btn.appendChild(count);
+
+    btn.addEventListener("click", () => {
+      if (playing || mine === opt.id) return;
+      Sfx?.unlock();
+      haptic("tap");
+      socket.emit("voteMap", opt.id);
+    });
+    mapVotePicker.appendChild(btn);
+  }
+
+  if (lobbyMapLabel && lobbyData?.mapPreview) {
+    const previewName =
+      options.find((o) => o.id === lobbyData.mapPreview.id)?.name || lobbyData.mapPreview.id;
+    lobbyMapLabel.textContent = playing
+      ? `Carte : ${previewName}`
+      : `Aperçu : ${previewName}${maxVotes > 0 ? " (en tête)" : ""}`;
   }
 }
 
@@ -531,13 +711,17 @@ function applyLobbyData(data) {
   const me = data.players.find((p) => p.id === myId);
   if (me) {
     myColor = me.color;
-    if (me.powers) {
-      myPowers = powersFromServer(me.powers);
-    }
+  }
+  if (data.settings?.roomPowers) {
+    myPowers = powersFromServer(data.settings.roomPowers);
+  } else if (me?.powers) {
+    myPowers = powersFromServer(me.powers);
   }
   updateLobbyUi();
+  updateMapVoteUi();
   updatePowerPickerUi();
   updatePowerLobbySection();
+  drawLobbyMapPreview(data.mapPreview);
 }
 
 function showHome() {
@@ -662,7 +846,7 @@ function buildPowerPicker() {
         <span>${def.hint}</span>
       </span>`;
     btn.addEventListener("click", () => {
-      if (!powersEnabledInLobby()) return;
+      if (!isHost || !powersEnabledInLobby()) return;
       const next = { ...myPowers, [id]: !myPowers[id] };
       const count = POWER_ORDER.filter((k) => next[k]).length;
       if (count === 0) return;
@@ -690,10 +874,91 @@ function emitUsePower(id) {
   }, 120);
 }
 
+function applyWheelUiConfig(segments, oddsLabel) {
+  wheelSegments = segments || 3;
+  if (resurrectWheel) {
+    resurrectWheel.classList.toggle("wheel-segments-3", wheelSegments === 3);
+    if (wheelSegments !== 3) {
+      resurrectWheel.style.removeProperty("background");
+    }
+  }
+  if (wheelCenterCap) wheelCenterCap.textContent = oddsLabel || `1/${wheelSegments}`;
+  if (wheelLegendWin) wheelLegendWin.textContent = "1 segment vert = revivre";
+  if (wheelLegendLose) {
+    const lose = Math.max(0, wheelSegments - 1);
+    wheelLegendLose.textContent =
+      lose === 1 ? "1 segment gris = rien" : `${lose} segments gris = rien`;
+  }
+}
+
+function applyGameRoleFromServer(data) {
+  if (!data) return;
+  myRole = data.role;
+  mySpecialRole = data.specialRole || "nul";
+  myDoctorPickDone = Boolean(data.doctorPickDone);
+  iHaveDoctorProtection = Boolean(data.doctorProtected);
+  if (data.mapName !== undefined) setRoleHudDisplay(data.mapName || "");
+  else setRoleHudDisplay();
+}
+
+function hideDoctorPicker() {
+  if (doctorPicker) doctorPicker.classList.add("hidden");
+}
+
+function openDoctorPicker() {
+  if (!doctorPicker || !doctorTargetList || !state?.players) return;
+  doctorTargetList.innerHTML = "";
+  const living = Object.values(state.players).filter(
+    (p) => p.alive && p.id !== myId && !p.hidden
+  );
+  if (living.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "Aucun joueur disponible.";
+    li.className = "small-hint";
+    doctorTargetList.appendChild(li);
+  } else {
+    for (const p of living) {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "doctor-target-btn";
+      const dot = document.createElement("span");
+      dot.className = "player-dot";
+      dot.style.background = p.appearanceColor || p.color;
+      btn.appendChild(dot);
+      const label = document.createElement("span");
+      label.textContent = p.appearanceName || p.name || "Joueur";
+      btn.appendChild(label);
+      btn.addEventListener("click", () => {
+        Sfx?.unlock();
+        haptic("tap");
+        socket.emit("doctorSelect", p.id);
+        hideDoctorPicker();
+      });
+      li.appendChild(btn);
+      doctorTargetList.appendChild(li);
+    }
+  }
+  doctorPicker.classList.remove("hidden");
+}
+
+function onDoctorPowerClick() {
+  if (mySpecialRole !== "medecin" || myDoctorPickDone) return;
+  Sfx?.unlock();
+  openDoctorPicker();
+}
+
 function buildPowerBar() {
   powerBar.innerHTML = "";
-  if (state?.powerSettings && state.powerSettings.enabled === false) return;
-  if (lobbyData?.settings?.powersEnabled === false) return;
+  if (state?.powerSettings && state.powerSettings.enabled === false) {
+    if (mySpecialRole === "medecin" && !myDoctorPickDone) appendDoctorPowerBtn();
+    return;
+  }
+  if (lobbyData?.settings?.powersEnabled === false) {
+    if (mySpecialRole === "medecin" && !myDoctorPickDone) appendDoctorPowerBtn();
+    return;
+  }
+  if (mySpecialRole === "medecin") appendDoctorPowerBtn();
   for (const id of POWER_ORDER) {
     if (!myPowers[id]) continue;
     const def = POWER_CATALOG[id];
@@ -712,6 +977,29 @@ function buildPowerBar() {
   }
 }
 
+function appendDoctorPowerBtn() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "power-btn doctor-power-btn";
+  btn.dataset.power = "doctor";
+  if (myDoctorPickDone) {
+    btn.classList.add("done");
+    btn.disabled = true;
+    btn.textContent = doctorPatientName
+      ? `🩺 Patient : ${doctorPatientName}`
+      : "🩺 Patient choisi";
+  } else {
+    btn.textContent = "🩺 Médecin";
+    btn.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onDoctorPowerClick();
+    });
+  }
+  powerBar.appendChild(btn);
+}
+
 function powerBtnLabel(id, me) {
   const def = POWER_CATALOG[id];
   const cdMs = me?.powerCooldownMs?.[id] || 0;
@@ -725,8 +1013,14 @@ function powerBtnLabel(id, me) {
 
 function updatePowerBarUi(me) {
   const powersOn = state?.powerSettings?.enabled !== false;
+  const showRoleAction =
+    mySpecialRole === "medecin" && me?.alive && !state?.gameOver;
   const show =
-    powersOn && phase === "playing" && controlMode && me?.alive && !state?.gameOver;
+    phase === "playing" &&
+    controlMode &&
+    me?.alive &&
+    !state?.gameOver &&
+    (powersOn || showRoleAction);
   if (show && powerBar.children.length === 0) {
     buildPowerBar();
   }
@@ -734,6 +1028,7 @@ function updatePowerBarUi(me) {
   if (!show || !me) return;
   for (const btn of powerBar.children) {
     const id = btn.dataset.power;
+    if (id === "doctor") continue;
     const cdMs = me.powerCooldownMs?.[id] || 0;
     const onCooldown = cdMs > 0;
     btn.disabled = onCooldown || me.frozen || powerClickLock;
@@ -980,10 +1275,9 @@ socket.on("lobby", (data) => {
   }
 });
 
-socket.on("gameStarted", ({ role, rematch }) => {
+socket.on("gameStarted", (data) => {
   clearJoinPending();
-  myRole = role;
-  roleHud.textContent = role === "impostor" ? "Rôle : Imposteur" : "Rôle : Innocent";
+  applyGameRoleFromServer(data);
   endScreen.classList.add("hidden");
   endCard.classList.remove("victory", "defeat");
   endRematchBtn.classList.add("hidden");
@@ -1041,6 +1335,12 @@ const DEATH_ANIM_MS = 1200;
 const RETURN_ANIM_MS = 1600;
 let resurrectCountdownTimer = null;
 let resurrectOfferEndsAt = 0;
+let wheelSegments = 3;
+function wheelSegmentDeg() {
+  return 360 / wheelSegments;
+}
+let wheelRotationDeg = 0;
+let wheelSpinning = false;
 let returnBannerHideTimer = null;
 let deathFlashUntil = 0;
 let wasFrozen = false;
@@ -1048,14 +1348,20 @@ let timerWarned30 = false;
 let timerWarned10 = false;
 let killReadyWas = false;
 let lastTimerBeepSec = -1;
+let hudMapName = "";
+const deathMarkers = [];
+const DEATH_MARKER_MS = 20000;
+let deathBannerHideTimer = null;
 
 function resetDeathTracking() {
   for (const k of Object.keys(playerAlivePrev)) delete playerAlivePrev[k];
   deathBursts.length = 0;
   returnBursts.length = 0;
+  deathMarkers.length = 0;
   deathFlashUntil = 0;
   hideResurrectPrompt();
   hideReturnBanner();
+  hideDeathBanner();
   wasFrozen = false;
   timerWarned30 = false;
   timerWarned10 = false;
@@ -1063,14 +1369,174 @@ function resetDeathTracking() {
   lastTimerBeepSec = -1;
 }
 
+function hideDeathBanner() {
+  if (deathBannerHideTimer) {
+    clearTimeout(deathBannerHideTimer);
+    deathBannerHideTimer = null;
+  }
+  if (!deathBanner) return;
+  deathBanner.classList.remove("visible");
+  deathBanner.classList.add("hidden");
+}
+
+function showDeathBanner(victimName) {
+  if (!deathBanner || !deathBannerText) return;
+  const label = victimName ? `${victimName} est mort` : "Un joueur est mort";
+  deathBannerText.textContent = `${label} — suis la flèche ☠`;
+  deathBanner.classList.remove("hidden");
+  deathBanner.classList.remove("visible");
+  void deathBanner.offsetWidth;
+  deathBanner.classList.add("visible");
+  if (deathBannerHideTimer) clearTimeout(deathBannerHideTimer);
+  deathBannerHideTimer = setTimeout(() => {
+    deathBannerHideTimer = null;
+    hideDeathBanner();
+  }, 4500);
+}
+
+function addDeathMarker(playerId, x, y, name, color) {
+  const now = performance.now();
+  const idx = deathMarkers.findIndex((m) => m.playerId === playerId);
+  const entry = { playerId, x, y, name, color, start: now };
+  if (idx >= 0) deathMarkers[idx] = entry;
+  else deathMarkers.push(entry);
+}
+
+function removeDeathMarker(playerId) {
+  const idx = deathMarkers.findIndex((m) => m.playerId === playerId);
+  if (idx >= 0) deathMarkers.splice(idx, 1);
+}
+
+function pruneDeathMarkers(now) {
+  for (let i = deathMarkers.length - 1; i >= 0; i--) {
+    if (now - deathMarkers[i].start > DEATH_MARKER_MS) deathMarkers.splice(i, 1);
+  }
+}
+
+function worldToScreen(wx, wy) {
+  return {
+    x: canvas.width / 2 + (wx - camera.x),
+    y: canvas.height / 2 + (wy - camera.y),
+  };
+}
+
+function drawDeathCompassIndicators(animNow, me, iAmGhost) {
+  if (!me?.alive || iAmGhost || !state?.map) return;
+  pruneDeathMarkers(animNow);
+  const { maze, tile } = state.map;
+  const pad = 48;
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+
+  for (const m of deathMarkers) {
+    const age = animNow - m.start;
+    let alpha = 1;
+    if (age < 400) alpha = age / 400;
+    else if (age > DEATH_MARKER_MS - 2000) alpha = Math.max(0, (DEATH_MARKER_MS - age) / 2000);
+    if (alpha <= 0.02) continue;
+
+    const visible = corpseVisibleToViewer(m.x, m.y, me, maze, tile, false);
+    const scr = worldToScreen(m.x, m.y);
+    const onScreen =
+      scr.x >= pad &&
+      scr.x <= canvas.width - pad &&
+      scr.y >= pad &&
+      scr.y <= canvas.height - pad;
+    if (visible && onScreen) continue;
+
+    const dx = scr.x - cx;
+    const dy = scr.y - cy;
+    if (Math.abs(dx) < 3 && Math.abs(dy) < 3) continue;
+    const hw = canvas.width / 2 - pad;
+    const hh = canvas.height / 2 - pad;
+    const t = Math.min(hw / Math.abs(dx), hh / Math.abs(dy));
+    const ex = cx + dx * t;
+    const ey = cy + dy * t;
+    const angle = Math.atan2(dy, dx);
+    const pulse = 0.85 + 0.15 * Math.sin(animNow / 180 + m.playerId.length);
+
+    ctx.save();
+    ctx.translate(ex, ey);
+    ctx.rotate(angle);
+    ctx.globalAlpha = alpha * pulse;
+    ctx.fillStyle = m.color || "#ef4444";
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-9, 8);
+    ctx.lineTo(-5, 0);
+    ctx.lineTo(-9, -8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.fillStyle = "#fecaca";
+    ctx.font = "700 11px Space Grotesk, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const lx = ex - Math.cos(angle) * 18;
+    const ly = ey - Math.sin(angle) * 18;
+    ctx.fillText("☠", lx, ly);
+    ctx.restore();
+  }
+}
+
+function setRoleHudDisplay(mapNameOverride) {
+  if (mapNameOverride !== undefined) hudMapName = mapNameOverride || "";
+  const me = state?.players?.[myId];
+  roleHud.classList.remove(
+    "role-innocent",
+    "role-impostor",
+    "role-ghost",
+    "role-inspecteur",
+    "role-medecin"
+  );
+  const mapBit = hudMapName ? ` · ${hudMapName}` : "";
+
+  if (me && !me.alive) {
+    roleHud.classList.add("role-ghost");
+    let ghostLine = `Fantôme 👻${mapBit}`;
+    if (iHaveDoctorProtection && resurrectOfferEndsAt > Date.now()) {
+      ghostLine = `Médecin : 1/3 pour revivre${mapBit}`;
+    } else if (iHaveDoctorProtection) {
+      ghostLine = `Protégé par le médecin${mapBit}`;
+    }
+    roleHud.textContent = ghostLine;
+    return;
+  }
+  if (myRole === "impostor") {
+    roleHud.classList.add("role-impostor");
+    roleHud.textContent = `Imposteur 🔪${mapBit}`;
+  } else if (mySpecialRole === "inspecteur") {
+    roleHud.classList.add("role-inspecteur");
+    roleHud.textContent = `Inspecteur 🔍${mapBit}`;
+  } else if (mySpecialRole === "medecin") {
+    roleHud.classList.add("role-medecin");
+    roleHud.textContent = `Médecin 🩺${mapBit}`;
+  } else if (myRole === "innocent") {
+    roleHud.classList.add("role-innocent");
+    roleHud.textContent = `Innocent 🛡️${mapBit}`;
+  } else {
+    roleHud.textContent = "Rôle —";
+  }
+}
+
 function processDeathTransitions(s) {
   if (!s?.players || phase !== "playing") return;
+  const me = s.players[myId];
   for (const [id, p] of Object.entries(s.players)) {
     const prev = playerAlivePrev[id];
     if (prev === true && p.alive === false) {
+      const cx = p.corpseX ?? p.x;
+      const cy = p.corpseY ?? p.y;
+      const victimName = p.name || "Joueur";
       deathBursts.push({
-        x: p.x,
-        y: p.y,
+        x: cx,
+        y: cy,
         color: id === myId ? p.color : p.appearanceColor || p.color,
         start: performance.now(),
         isMe: id === myId,
@@ -1079,9 +1545,29 @@ function processDeathTransitions(s) {
       if (id === myId) {
         deathFlashUntil = performance.now() + 700;
         haptic("death");
-      } else if (myRole === "impostor") {
-        Sfx?.kill();
-        haptic("kill");
+        powerBar.classList.add("hidden");
+        powerBar.innerHTML = "";
+        if (deathBannerText) {
+          deathBannerText.textContent = "Tu es mort — tu deviens fantôme 👻";
+          deathBanner.classList.remove("hidden");
+          deathBanner.classList.remove("visible");
+          void deathBanner.offsetWidth;
+          deathBanner.classList.add("visible");
+          if (deathBannerHideTimer) clearTimeout(deathBannerHideTimer);
+          deathBannerHideTimer = setTimeout(() => {
+            deathBannerHideTimer = null;
+            hideDeathBanner();
+          }, 4500);
+        }
+      } else {
+        if (me?.alive && mySpecialRole === "inspecteur") {
+          addDeathMarker(id, cx, cy, victimName, p.color);
+          showDeathBanner(victimName);
+        }
+        if (myRole === "impostor") {
+          Sfx?.kill();
+          haptic("kill");
+        }
       }
     }
     playerAlivePrev[id] = p.alive;
@@ -1131,51 +1617,137 @@ function playResurrectFx(data) {
   }
 }
 
+function resetWheelUi() {
+  wheelSpinning = false;
+  wheelRotationDeg = Math.random() * 360;
+  if (resurrectWheel) {
+    resurrectWheel.classList.remove("spinning");
+    resurrectWheel.style.transform = `rotate(${wheelRotationDeg}deg)`;
+  }
+  if (resurrectSpinBtn) {
+    resurrectSpinBtn.disabled = false;
+    resurrectSpinBtn.textContent = "Tourner la roue";
+  }
+  if (resurrectWheelMsg) {
+    resurrectWheelMsg.textContent = "";
+    resurrectWheelMsg.classList.remove("win", "lose");
+  }
+}
+
 function hideResurrectPrompt() {
   resurrectPrompt.classList.add("hidden");
   resurrectOfferEndsAt = 0;
+  resetWheelUi();
   if (resurrectCountdownTimer) {
     clearInterval(resurrectCountdownTimer);
     resurrectCountdownTimer = null;
   }
 }
 
-function showResurrectPrompt(timeoutMs) {
+function showResurrectPrompt(timeoutMs, options = {}) {
   Sfx?.unlock();
   Sfx?.resurrectOffer();
   haptic("offer");
+  applyWheelUiConfig(options.segments || 3, options.oddsLabel || "1/3");
+  if (resurrectTitle) {
+    resurrectTitle.textContent =
+      options.mode === "doctor"
+        ? "Le médecin veut te sauver"
+        : "Roue de la seconde chance";
+  }
+  if (resurrectHint) {
+    resurrectHint.innerHTML =
+      options.mode === "doctor"
+        ? "<strong>1 chance sur 3</strong> de revivre — une seule tentative."
+        : "<strong>Tourne la roue</strong> une fois.";
+  }
+  resetWheelUi();
   resurrectOfferEndsAt = Date.now() + timeoutMs;
   resurrectPrompt.classList.remove("hidden");
+  setRoleHudDisplay();
   const tick = () => {
     const left = Math.max(0, resurrectOfferEndsAt - Date.now());
     const sec = Math.ceil(left / 1000);
-    resurrectCountdown.textContent = left > 0 ? `Temps pour choisir : ${sec} s` : "Temps écoulé…";
+    resurrectCountdown.textContent = left > 0 ? `Temps pour tourner : ${sec} s` : "Temps écoulé…";
   };
   tick();
   if (resurrectCountdownTimer) clearInterval(resurrectCountdownTimer);
   resurrectCountdownTimer = setInterval(tick, 250);
 }
 
-function sendResurrectChoice(accept) {
-  if (!resurrectOfferEndsAt || Date.now() > resurrectOfferEndsAt + 400) {
+function wheelRotationForSegment(segmentIndex) {
+  const extraSpins = 4 + Math.floor(Math.random() * 3);
+  const segDeg = wheelSegmentDeg();
+  const target =
+    extraSpins * 360 + (wheelSegments - segmentIndex) * segDeg - segDeg / 2;
+  return wheelRotationDeg + target;
+}
+
+function animateWheelToSegment(segmentIndex, onDone) {
+  if (!resurrectWheel) {
+    onDone?.();
+    return;
+  }
+  const next = wheelRotationForSegment(segmentIndex);
+  wheelRotationDeg = next % 360;
+  resurrectWheel.classList.add("spinning");
+  requestAnimationFrame(() => {
+    resurrectWheel.style.transform = `rotate(${next}deg)`;
+  });
+  const onEnd = () => {
+    resurrectWheel.classList.remove("spinning");
+    resurrectWheel.removeEventListener("transitionend", onEnd);
+    onDone?.();
+  };
+  resurrectWheel.addEventListener("transitionend", onEnd);
+}
+
+function requestWheelSpin() {
+  if (wheelSpinning || !resurrectOfferEndsAt) return;
+  if (Date.now() > resurrectOfferEndsAt + 400) {
+    hideResurrectPrompt();
+    return;
+  }
+  wheelSpinning = true;
+  if (resurrectSpinBtn) {
+    resurrectSpinBtn.disabled = true;
+    resurrectSpinBtn.textContent = "La roue tourne…";
+  }
+  Sfx?.unlock();
+  Sfx?.wheelSpin?.();
+  socket.emit("resurrectChoice", true);
+}
+
+function sendResurrectDecline() {
+  if (!resurrectOfferEndsAt || wheelSpinning) return;
+  if (Date.now() > resurrectOfferEndsAt + 400) {
     hideResurrectPrompt();
     return;
   }
   Sfx?.unlock();
   hideResurrectPrompt();
-  socket.emit("resurrectChoice", accept === true);
+  socket.emit("resurrectChoice", false);
 }
 
-resurrectYes.addEventListener("pointerdown", (e) => {
-  if (e.pointerType === "mouse" && e.button !== 0) return;
-  e.preventDefault();
-  sendResurrectChoice(true);
-});
+if (resurrectSpinBtn) {
+  resurrectSpinBtn.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    requestWheelSpin();
+  });
+}
 resurrectNo.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse" && e.button !== 0) return;
   e.preventDefault();
-  sendResurrectChoice(false);
+  sendResurrectDecline();
 });
+
+if (doctorPickerClose) {
+  doctorPickerClose.addEventListener("click", () => {
+    Sfx?.unlock();
+    hideDoctorPicker();
+  });
+}
 
 function drawReturnBursts(now) {
   for (let i = returnBursts.length - 1; i >= 0; i--) {
@@ -1321,20 +1893,78 @@ socket.on("disconnect", () => {
   }, 18000);
 });
 
-socket.on("resurrectOffer", ({ timeoutMs }) => {
+socket.on("resurrectOffer", (payload) => {
   if (phase !== "playing") return;
-  showResurrectPrompt(timeoutMs || 14000);
+  const timeoutMs = payload?.timeoutMs || 14000;
+  showResurrectPrompt(timeoutMs, payload || {});
+});
+
+socket.on("doctorProtected", ({ message }) => {
+  iHaveDoctorProtection = true;
+  if (message && phase === "playing") {
+    returnBannerText.textContent = message;
+    returnBanner.classList.remove("hidden");
+    returnBanner.classList.add("visible");
+    setTimeout(() => hideReturnBanner(), 4200);
+  }
+  setRoleHudDisplay();
+});
+
+socket.on("doctorSelectResult", (data) => {
+  if (!data?.ok) {
+    if (data?.reason === "already_picked") myDoctorPickDone = true;
+    return;
+  }
+  myDoctorPickDone = true;
+  doctorPatientName = data.targetName || null;
+  buildPowerBar();
 });
 
 socket.on("resurrectOfferClosed", () => {
   hideResurrectPrompt();
 });
 
-socket.on("resurrectResult", () => {
+socket.on("resurrectResult", (data) => {
+  if (data?.reason === "declined" || data?.reason === "expired") {
+    hideResurrectPrompt();
+    return;
+  }
+  if (data?.reason === "already_spun") {
+    wheelSpinning = false;
+    if (resurrectSpinBtn) resurrectSpinBtn.disabled = true;
+    return;
+  }
+  if (typeof data?.won === "boolean") {
+    const winSegment = data.won ? 0 : 1 + Math.floor(Math.random() * (wheelSegments - 1));
+    animateWheelToSegment(winSegment, () => {
+      wheelSpinning = false;
+      if (resurrectWheelMsg) {
+        if (data.won) {
+          resurrectWheelMsg.textContent = "Gagné ! Tu reviens à la vie !";
+          resurrectWheelMsg.classList.add("win");
+          Sfx?.wheelWin?.();
+          haptic("return");
+          iHaveDoctorProtection = false;
+          setTimeout(hideResurrectPrompt, 900);
+        } else {
+          resurrectWheelMsg.textContent = "Perdu… tu restes fantôme.";
+          resurrectWheelMsg.classList.add("lose");
+          Sfx?.wheelLose?.();
+          haptic("defeat");
+          iHaveDoctorProtection = false;
+          setTimeout(hideResurrectPrompt, 1400);
+        }
+      } else {
+        hideResurrectPrompt();
+      }
+    });
+    return;
+  }
   hideResurrectPrompt();
 });
 
 socket.on("playerResurrected", (data) => {
+  if (data?.playerId) removeDeathMarker(data.playerId);
   playResurrectFx(data);
 });
 
@@ -1390,8 +2020,13 @@ socket.on("state", (s) => {
   }
   state = s;
   processDeathTransitions(s);
-  if (s.players?.[myId] && phase === "playing" && powerBar.children.length === 0) {
+  const meState = s.players?.[myId];
+  if (meState?.alive && phase === "playing" && powerBar.children.length === 0) {
     buildPowerBar();
+  }
+  if (meState && !meState.alive && powerBar.children.length > 0) {
+    powerBar.innerHTML = "";
+    powerBar.classList.add("hidden");
   }
   if (phase === "playing") {
     lastAliveCount = s.innocentsAlive ?? null;
@@ -1406,6 +2041,15 @@ function updateLobbyUi() {
     return;
   }
   lobbyCodeEl.textContent = lobbyData.code;
+  if (playerCountBadge) {
+    playerCountBadge.textContent = String(lobbyData.players.length);
+  }
+  if (lobbyMeta && lobbyData.settings) {
+    const pwr = lobbyData.settings.powersEnabled !== false ? "Pouvoirs ON" : "Pouvoirs OFF";
+    lobbyMeta.textContent = `${lobbyData.players.length} joueur(s) · ${lobbyData.settings.impostors} imposteur(s) · ${formatTime(lobbyData.settings.timerSec * 1000)} · ${pwr}`;
+  }
+  drawLobbyMapPreview(lobbyData.mapPreview);
+  updateMapVoteUi();
   hostSettings.classList.toggle("hidden", !isHost);
 
   document.querySelectorAll(".color-swatch").forEach((btn) => {
@@ -1420,12 +2064,13 @@ function updateLobbyUi() {
   playerList.innerHTML = "";
   for (const p of lobbyData.players) {
     const li = document.createElement("li");
+    if (p.id === myId) li.classList.add("is-me");
     const dot = document.createElement("span");
     dot.className = "player-dot";
     dot.style.background = p.color;
-    dot.style.borderRadius = "3px";
     li.appendChild(dot);
     const label = document.createElement("span");
+    label.className = "player-name";
     label.textContent = p.name;
     if (p.id === myId) label.textContent += " (toi)";
     li.appendChild(label);
@@ -1574,6 +2219,16 @@ function myMaxWallSegments(me) {
   return me?.visionActive ? VISION_EXTRA_WALLS : 0;
 }
 
+function fullMapVisibility(map) {
+  const { w, h } = map;
+  const vis = [];
+  for (let ty = 0; ty < h; ty++) {
+    vis[ty] = [];
+    for (let tx = 0; tx < w; tx++) vis[ty][tx] = true;
+  }
+  return vis;
+}
+
 function computeVisibility(map, px, py, me) {
   const { maze, tile, w, h } = map;
   const radius = myViewRadius(me);
@@ -1590,6 +2245,19 @@ function computeVisibility(map, px, py, me) {
     }
   }
   return vis;
+}
+
+function playerCorpsePos(p) {
+  if (p.alive) return { x: p.x, y: p.y };
+  return {
+    x: p.corpseX != null ? p.corpseX : p.x,
+    y: p.corpseY != null ? p.corpseY : p.y,
+  };
+}
+
+function localPlayerIsGhost() {
+  const me = state?.players?.[myId];
+  return Boolean(me && !me.alive && phase === "playing" && !state?.gameOver);
 }
 
 const mapAmbientDots = [];
@@ -1626,15 +2294,25 @@ function mapCameraWobble(t) {
   return { wx, wy, scale };
 }
 
+function corridorOrientation(maze, tx, ty, mw, mh) {
+  const up = ty > 0 && maze[ty - 1][tx] === 1;
+  const down = ty < mh - 1 && maze[ty + 1][tx] === 1;
+  const left = tx > 0 && maze[ty][tx - 1] === 1;
+  const right = tx < mw - 1 && maze[ty][tx + 1] === 1;
+  if (up && down) return "h";
+  if (left && right) return "v";
+  return null;
+}
+
 function drawMapBackground(map, t) {
   const calm = Comfort?.shouldReduceMotion?.();
   const W = map.w * map.tile;
   const H = map.h * map.tile;
   const pulse = calm ? 0.5 : 0.5 + 0.5 * Math.sin(t * 0.72);
   const g = ctx.createRadialGradient(W * 0.5, H * 0.5, 30, W * 0.5, H * 0.5, Math.max(W, H) * 0.72);
-  g.addColorStop(0, `rgba(52, 78, 118, ${0.28 + pulse * 0.1})`);
-  g.addColorStop(0.55, "rgba(22, 30, 46, 0.92)");
-  g.addColorStop(1, "rgba(8, 10, 16, 1)");
+  g.addColorStop(0, `rgba(45, 70, 110, ${0.32 + pulse * 0.1})`);
+  g.addColorStop(0.5, "rgba(18, 24, 38, 0.95)");
+  g.addColorStop(1, "rgba(4, 6, 10, 1)");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
 
@@ -1672,54 +2350,81 @@ function drawMapAmbient(map, vis, t) {
   }
 }
 
-function canSeePlayer(me, other, maze, tile) {
+function canSeePlayer(me, other, maze, tile, viewerIsGhost) {
+  if (viewerIsGhost) {
+    if (other.alive) return true;
+    return false;
+  }
   if (other.hidden && other.id !== myId) return false;
   const radius = myViewRadius(me);
   const maxWalls = myMaxWallSegments(me);
-  if (!other.alive) {
-    return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile, maxWalls);
-  }
+  if (!other.alive) return false;
   const d = Math.hypot(other.x - me.x, other.y - me.y);
   if (d > radius) return false;
   return hasLineOfSight(me.x, me.y, other.x, other.y, maze, tile, maxWalls);
 }
 
-function drawTile(x, y, tile, isWall, visible, tx, ty, t) {
+function corpseVisibleToViewer(corpseX, corpseY, me, maze, tile, viewerIsGhost) {
+  if (viewerIsGhost) return true;
+  const radius = myViewRadius(me);
+  const maxWalls = myMaxWallSegments(me);
+  const d = Math.hypot(corpseX - me.x, corpseY - me.y);
+  if (d > radius + tile) return false;
+  return hasLineOfSight(me.x, me.y, corpseX, corpseY, maze, tile, maxWalls);
+}
+
+function drawTile(x, y, tile, isWall, visible, tx, ty, t, maze, mw, mh) {
   if (!visible) return;
   const tilePulse = 0.5 + 0.5 * Math.sin(t * 1.6 + tx * 0.55 + ty * 0.42);
   if (isWall) {
     const calm = Comfort?.shouldReduceMotion?.();
-    const vibrate = calm ? 0 : Math.sin(t * 3.2 + tx * 1.1 + ty * 0.8) * 0.35;
+    const vibrate = calm ? 0 : Math.sin(t * 3.2 + tx * 1.1 + ty * 0.8) * 0.22;
     const wx = x + vibrate;
     const wy = y + vibrate * 0.6;
     const wallGrad = ctx.createLinearGradient(wx, wy, wx, wy + tile);
-    const top = 58 + tilePulse * 10;
-    wallGrad.addColorStop(0, `rgb(${top + 4}, ${top + 18}, ${top + 42})`);
-    wallGrad.addColorStop(1, `rgb(${36 + tilePulse * 6}, ${46 + tilePulse * 4}, ${64 + tilePulse * 5})`);
+    const top = 48 + tilePulse * 12;
+    wallGrad.addColorStop(0, `rgb(${top + 8}, ${top + 22}, ${top + 48})`);
+    wallGrad.addColorStop(0.55, `rgb(${32 + tilePulse * 5}, ${40 + tilePulse * 4}, ${58 + tilePulse * 5})`);
+    wallGrad.addColorStop(1, `rgb(${18 + tilePulse * 3}, ${22 + tilePulse * 2}, ${32 + tilePulse * 3})`);
     ctx.fillStyle = wallGrad;
     ctx.fillRect(wx, wy, tile, tile);
-    ctx.strokeStyle = `rgba(110, 145, 190, ${0.45 + tilePulse * 0.2})`;
+    ctx.strokeStyle = `rgba(90, 120, 165, ${0.5 + tilePulse * 0.15})`;
     ctx.strokeRect(wx + 0.5, wy + 0.5, tile - 1, tile - 1);
     const shimmer = 3 + Math.sin(t * 2.8 + tx + ty) * 2;
-    ctx.fillStyle = `rgba(180, 220, 255, ${0.08 + tilePulse * 0.1})`;
-    ctx.fillRect(wx + shimmer, wy + 3, tile - shimmer * 2, 5);
-    ctx.fillStyle = `rgba(255, 120, 140, ${0.03 + tilePulse * 0.04})`;
-    ctx.fillRect(wx + tile - 6, wy + tile - 8, 4, 4);
+    ctx.fillStyle = `rgba(180, 220, 255, ${0.1 + tilePulse * 0.08})`;
+    ctx.fillRect(wx + shimmer, wy + 2, tile - shimmer * 2, 4);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+    ctx.fillRect(wx, wy + tile - 5, tile, 5);
   } else {
     const floorGrad = ctx.createLinearGradient(x, y, x + tile, y + tile);
-    const lift = tilePulse * 8;
-    floorGrad.addColorStop(0, `rgb(${56 + lift}, ${72 + lift}, ${94 + lift})`);
-    floorGrad.addColorStop(1, `rgb(${40 + lift * 0.5}, ${50 + lift * 0.4}, ${68 + lift * 0.5})`);
+    const lift = tilePulse * 6;
+    floorGrad.addColorStop(0, `rgb(${42 + lift}, ${58 + lift}, ${78 + lift})`);
+    floorGrad.addColorStop(1, `rgb(${28 + lift * 0.4}, ${36 + lift * 0.35}, ${50 + lift * 0.4})`);
     ctx.fillStyle = floorGrad;
     ctx.fillRect(x, y, tile, tile);
     const checker = (tx + ty) % 2 === 0;
-    ctx.fillStyle = `rgba(255, 255, 255, ${checker ? 0.035 + tilePulse * 0.03 : 0.015})`;
+    ctx.fillStyle = `rgba(255, 255, 255, ${checker ? 0.04 + tilePulse * 0.02 : 0.018})`;
     ctx.fillRect(x, y, tile, tile);
-    const glossY = 4 + Math.sin(t * 2.2 + tx * 0.7) * 2;
-    ctx.fillStyle = `rgba(160, 210, 255, ${0.07 + tilePulse * 0.08})`;
-    ctx.fillRect(x + 4, y + glossY, tile - 8, tile / 2 - 2);
-    ctx.strokeStyle = `rgba(120, 170, 230, ${0.12 + tilePulse * 0.1})`;
-    ctx.strokeRect(x + 1, y + 1, tile - 2, tile - 2);
+    if (maze && mw && mh) {
+      const orient = corridorOrientation(maze, tx, ty, mw, mh);
+      if (orient) {
+        ctx.strokeStyle = `rgba(34, 211, 238, ${0.22 + tilePulse * 0.12})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        const cx = x + tile / 2;
+        const cy = y + tile / 2;
+        if (orient === "h") {
+          ctx.moveTo(x + 4, cy);
+          ctx.lineTo(x + tile - 4, cy);
+        } else {
+          ctx.moveTo(cx, y + 4);
+          ctx.lineTo(cx, y + tile - 4);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.strokeStyle = `rgba(80, 130, 180, ${0.1 + tilePulse * 0.06})`;
+    ctx.strokeRect(x + 1.5, y + 1.5, tile - 3, tile - 3);
   }
 }
 
@@ -1739,15 +2444,27 @@ function drawMaze(map, vis, t) {
   const { maze, tile, w, h } = map;
   for (let ty = 0; ty < h; ty++) {
     for (let tx = 0; tx < w; tx++) {
-      drawTile(tx * tile, ty * tile, tile, maze[ty][tx] === 1, vis[ty][tx], tx, ty, t);
+      drawTile(
+        tx * tile,
+        ty * tile,
+        tile,
+        maze[ty][tx] === 1,
+        vis[ty][tx],
+        tx,
+        ty,
+        t,
+        maze,
+        w,
+        h
+      );
     }
   }
 }
 
 function drawFog(map, vis, t) {
   const { tile, w, h } = map;
-  const fogPulse = 0.76 + 0.04 * Math.sin(t * 1.3);
-  ctx.fillStyle = `rgba(0, 0, 0, ${fogPulse})`;
+  const fogPulse = 0.78 + 0.04 * Math.sin(t * 1.3);
+  ctx.fillStyle = `rgba(2, 4, 10, ${fogPulse})`;
   for (let ty = 0; ty < h; ty++) {
     for (let tx = 0; tx < w; tx++) {
       if (!vis[ty][tx]) {
@@ -1807,6 +2524,65 @@ function playerDrawColor(p, isMe) {
 function playerDrawName(p, isMe) {
   if (isMe) return p.name || "Joueur";
   return p.appearanceName || p.name || "Joueur";
+}
+
+function drawCorpseBody(p, t) {
+  const { x, y } = playerCorpsePos(p);
+  const size = 26;
+  const bob = Math.sin(t * 2.2) * 0.5;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.rotate(p.angle);
+  ctx.globalAlpha = 0.42;
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(-size / 2 + 2, size / 2 - 2, size - 4, 6);
+  ctx.fillStyle = playerDrawColor(p, false);
+  ctx.fillRect(-size / 2, -size / 2, size, size);
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-size / 2, -size / 2, size, size);
+  ctx.fillStyle = "#fff";
+  ctx.font = "700 16px Space Grotesk, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("✕", 0, 1);
+  ctx.restore();
+  ctx.fillStyle = "rgba(148, 163, 184, 0.75)";
+  ctx.font = "600 10px Space Grotesk, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(playerDrawName(p, false), x, y - 20);
+}
+
+function drawGhostCube(p, isMe, t) {
+  const size = 24;
+  const float = Math.sin(t * 3.5 + (p.id?.length || 0)) * 3;
+  ctx.save();
+  ctx.translate(p.x, p.y + float);
+  ctx.rotate(p.angle);
+  ctx.globalAlpha = isMe ? 0.72 : 0.55;
+  const glow = ctx.createRadialGradient(0, 0, 4, 0, 0, size);
+  glow.addColorStop(0, "rgba(186, 230, 253, 0.35)");
+  glow.addColorStop(1, "rgba(186, 230, 253, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(-size, -size, size * 2, size * 2);
+  ctx.fillStyle = isMe ? "rgba(224, 242, 254, 0.55)" : "rgba(148, 163, 184, 0.4)";
+  ctx.fillRect(-size / 2, -size / 2, size, size);
+  ctx.strokeStyle = isMe ? "#e0f2fe" : "rgba(226, 232, 240, 0.65)";
+  ctx.lineWidth = isMe ? 2.5 : 2;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(-size / 2, -size / 2, size, size);
+  ctx.setLineDash([]);
+  ctx.font = "700 14px Space Grotesk, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#f8fafc";
+  ctx.fillText("👻", 0, 1);
+  ctx.restore();
+  ctx.fillStyle = isMe ? "#bae6fd" : "rgba(186, 230, 253, 0.75)";
+  ctx.font = "600 10px Space Grotesk, sans-serif";
+  ctx.textAlign = "center";
+  const label = isMe ? `${playerDrawName(p, true)} (fantôme)` : playerDrawName(p, false);
+  ctx.fillText(label, p.x, p.y + float - 22);
 }
 
 function drawPlayerCube(p, isMe, dead) {
@@ -1891,6 +2667,7 @@ function updateHud() {
   }
   aliveHud.textContent = `Innocents vivants : ${state.innocentsAlive ?? "—"}`;
   const me = state.players[myId];
+  setRoleHudDisplay();
   if (me?.frozen && !wasFrozen) {
     Sfx?.frozenHit();
     haptic("frozen");
@@ -1954,14 +2731,17 @@ function render() {
   ensureMapAmbient(state.map);
 
   const me = state.players[myId];
+  const iAmGhost = localPlayerIsGhost();
   if (me) {
     camera.x = me.x;
     camera.y = me.y;
-    visibility = computeVisibility(state.map, me.x, me.y, me);
+    visibility = iAmGhost
+      ? fullMapVisibility(state.map)
+      : computeVisibility(state.map, me.x, me.y, me);
   }
 
   const viewR = me ? myViewRadius(me) : VIEW_RADIUS;
-  const wobble = mapCameraWobble(t);
+  const wobble = iAmGhost ? { wx: 0, wy: 0, scale: 1 } : mapCameraWobble(t);
 
   ctx.save();
   ctx.translate(canvas.width / 2 + wobble.wx, canvas.height / 2 + wobble.wy);
@@ -1972,37 +2752,77 @@ function render() {
     drawMapBackground(state.map, t);
     drawMaze(state.map, visibility, t);
     drawMapAmbient(state.map, visibility, t);
-    if (me) drawPlayerGlow(me.x, me.y, viewR, t);
+    if (me && me.alive) drawPlayerGlow(me.x, me.y, viewR, t);
+    if (iAmGhost && me) drawPlayerGlow(me.x, me.y, Math.max(viewR, 120), t);
   }
 
+  const { maze, tile } = state.map;
   for (const p of Object.values(state.players)) {
     if (!p.portal) continue;
     const portalVisible =
+      iAmGhost ||
       p.id === myId ||
-      (me && hasLineOfSight(me.x, me.y, p.portal.x, p.portal.y, state.map.maze, state.map.tile));
+      (me && hasLineOfSight(me.x, me.y, p.portal.x, p.portal.y, maze, tile));
     if (portalVisible) drawPortal(p.portal, t);
   }
 
-  const sorted = Object.values(state.players).sort((a, b) => a.y - b.y);
-  for (const p of sorted) {
-    if (p.id === myId) {
-      drawPlayerCube(p, true, !p.alive);
-      continue;
+  const corpses = [];
+  const ghosts = [];
+  const living = [];
+  for (const p of Object.values(state.players)) {
+    if (!p.alive) {
+      corpses.push(p);
+      ghosts.push(p);
+    } else {
+      living.push(p);
     }
-    const visible = me && canSeePlayer(me, p, state.map.maze, state.map.tile);
-    if (visible) drawPlayerCube(p, false, !p.alive);
+  }
+
+  const drawCorpseIfVisible = (p) => {
+    const c = playerCorpsePos(p);
+    if (!me) return;
+    if (!corpseVisibleToViewer(c.x, c.y, me, maze, tile, iAmGhost)) return;
+    drawCorpseBody(p, t);
+  };
+
+  for (const p of corpses.sort((a, b) => playerCorpsePos(a).y - playerCorpsePos(b).y)) {
+    drawCorpseIfVisible(p);
   }
 
   drawDeathBursts(animNow);
   drawReturnBursts(animNow);
 
-  if (visibility) {
+  for (const p of living.sort((a, b) => a.y - b.y)) {
+    if (p.id === myId) {
+      drawPlayerCube(p, true, false);
+      continue;
+    }
+    const visible = me && canSeePlayer(me, p, maze, tile, iAmGhost);
+    if (visible) drawPlayerCube(p, false, false);
+  }
+
+  if (iAmGhost) {
+    for (const p of ghosts.sort((a, b) => a.y - b.y)) {
+      drawGhostCube(p, p.id === myId, t);
+    }
+  }
+
+  if (visibility && !iAmGhost) {
     drawFog(state.map, visibility, t);
   }
 
   ctx.restore();
 
-  drawScreenVignette(t);
+  if (me?.alive && !iAmGhost) {
+    drawDeathCompassIndicators(animNow, me, iAmGhost);
+  }
+
+  if (!iAmGhost) {
+    drawScreenVignette(t);
+  } else {
+    ctx.fillStyle = "rgba(34, 211, 238, 0.04)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   const flashNow = animNow;
   if (flashNow < deathFlashUntil) {
@@ -2018,13 +2838,18 @@ function render() {
     ctx.fillText("Tu es gelé !", canvas.width / 2, canvas.height - 48);
   }
 
-  if (me && !me.alive && resurrectPrompt.classList.contains("hidden")) {
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#fff";
-    ctx.font = "700 26px Space Grotesk";
+  if (iAmGhost && resurrectPrompt.classList.contains("hidden")) {
+    ctx.fillStyle = "rgba(186, 230, 253, 0.92)";
+    ctx.font = "600 13px Space Grotesk";
     ctx.textAlign = "center";
-    ctx.fillText("Tu es mort — tu observes…", canvas.width / 2, canvas.height / 2);
+    let ghostHint =
+      "Fantôme — 3× plus rapide, traverse les murs, vue totale, pas de pouvoirs";
+    if (iHaveDoctorProtection && resurrectOfferEndsAt > Date.now()) {
+      ghostHint = "Le médecin t’a protégé — tourne la roue : 1 chance sur 3 de revivre";
+    } else if (iHaveDoctorProtection) {
+      ghostHint = "Tu étais protégé par le médecin";
+    }
+    ctx.fillText(ghostHint, canvas.width / 2, canvas.height - 36);
   }
 
   updateHud();

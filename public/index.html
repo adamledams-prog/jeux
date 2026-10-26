@@ -18,9 +18,16 @@
   </head>
   <body>
     <div id="overlay" class="overlay">
-      <div id="screenHome" class="panel">
-        <h1>Labyrinthe live</h1>
-        <p class="tagline">Innocents vs imposteurs dans le labyrinthe. Survis jusqu’à la fin du timer !</p>
+      <div class="overlay-glow" aria-hidden="true"></div>
+      <div id="screenHome" class="panel panel-glass">
+        <header class="brand-row">
+          <div class="brand-icon" aria-hidden="true">◈</div>
+          <div>
+            <h1>Labyrinthe <span class="brand-accent">live</span></h1>
+            <p class="brand-sub">Innocents vs imposteurs · couloirs étroits</p>
+          </div>
+        </header>
+        <p class="tagline">Crée une salle ou rejoins tes amis avec un code à 3 chiffres.</p>
         <label for="name">Ton pseudo</label>
         <input id="name" type="text" maxlength="16" placeholder="Ex: Adam" autocomplete="off" />
 
@@ -45,7 +52,7 @@
           <li>Joue sur <strong>jeux-tawny.vercel.app</strong> — deux « Joueur » sans pseudo : OK (renommés auto)</li>
           <li>Ordinateur : flèches — Téléphone : joystick</li>
           <li>Imposteur : bouton <strong>Tuer</strong> quand tu es tout près</li>
-          <li>Tu ne vois pas à travers les murs</li>
+          <li>Vivant : pas de vision à travers les murs — mort : fantôme 👻 (murs + carte entière)</li>
         </ul>
 
         <div class="comfort-block">
@@ -70,32 +77,53 @@
         </div>
       </div>
 
-      <div id="screenLobby" class="panel panel-wide hidden">
-        <p class="lobby-label">Code de la partie</p>
-        <p id="lobbyCode" class="room-code">---</p>
-        <p class="tagline center">Partage ce code. Choisis ta couleur ci-dessous.</p>
+      <div id="screenLobby" class="panel panel-wide panel-lobby panel-glass hidden">
+        <div class="lobby-top">
+          <div class="lobby-top-main">
+            <p class="lobby-label">Code de la partie</p>
+            <div class="room-code-card">
+              <p id="lobbyCode" class="room-code">---</p>
+              <button id="copyCodeBtn" type="button" class="copy-code-btn">Copier</button>
+            </div>
+            <p id="lobbyMeta" class="lobby-meta">En attente des joueurs…</p>
+          </div>
+          <div class="lobby-map-wrap">
+            <canvas id="lobbyMapPreview" width="220" height="132" aria-label="Aperçu du labyrinthe"></canvas>
+            <span id="lobbyMapLabel" class="lobby-map-label">Aperçu · vote en cours</span>
+          </div>
+        </div>
 
-        <h2 class="lobby-title">Ta couleur</h2>
-        <div id="colorPicker" class="color-picker"></div>
+        <section class="lobby-section">
+          <h2 class="section-title">Vote pour la carte</h2>
+          <p class="tagline center small-hint">La carte avec le plus de votes sera jouée (égalité = tirage au sort).</p>
+          <div id="mapVotePicker" class="map-vote-grid" role="group" aria-label="Choix de carte"></div>
+        </section>
+
+        <section class="lobby-section">
+          <h2 class="section-title">Ta couleur</h2>
+          <div id="colorPicker" class="color-picker"></div>
+        </section>
 
         <div id="hostSettings" class="host-settings hidden">
-          <h2 class="lobby-title">Paramètres (hôte)</h2>
-          <div class="setting-row">
-            <label for="impostorSelect">Imposteurs</label>
-            <select id="impostorSelect">
-              <option value="1">1 imposteur</option>
-              <option value="2">2 imposteurs</option>
-              <option value="3">3 imposteurs</option>
-            </select>
-          </div>
-          <div class="setting-row">
-            <label for="timerSelect">Durée</label>
-            <select id="timerSelect">
-              <option value="90">1:30</option>
-              <option value="120" selected>2:00</option>
-              <option value="150">2:30</option>
-              <option value="180">3:00</option>
-            </select>
+          <h2 class="section-title">Paramètres (hôte)</h2>
+          <div class="settings-grid">
+            <div class="setting-row">
+              <label for="impostorSelect">Imposteurs</label>
+              <select id="impostorSelect">
+                <option value="1">1 imposteur</option>
+                <option value="2">2 imposteurs</option>
+                <option value="3">3 imposteurs</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label for="timerSelect">Durée</label>
+              <select id="timerSelect">
+                <option value="90">1:30</option>
+                <option value="120" selected>2:00</option>
+                <option value="150">2:30</option>
+                <option value="180">3:00</option>
+              </select>
+            </div>
           </div>
           <div class="setting-row setting-row-check">
             <label class="check-label" for="powersEnabled">
@@ -136,20 +164,43 @@
           </div>
         </div>
 
-        <div id="powerPickerSection">
-          <h2 class="lobby-title">Pouvoirs équipés</h2>
+        <section id="powerPickerSection" class="lobby-section">
+          <h2 class="section-title">Pouvoirs de la partie</h2>
           <p id="powerPickerHint" class="tagline center small-hint">
-            Clique pour activer ou désactiver avant la partie.
+            L’hôte choisit les mêmes pouvoirs pour tout le monde.
           </p>
           <p id="powerDisabledMsg" class="tagline center small-hint hidden">
             Les pouvoirs sont désactivés pour cette partie.
           </p>
           <p id="powerCooldownInfo" class="tagline center small-hint hidden"></p>
           <div id="powerPicker" class="power-picker"></div>
-        </div>
+        </section>
 
-        <h2 class="lobby-title">Joueurs</h2>
-        <ul id="playerList" class="player-list"></ul>
+        <section class="lobby-section roles-guide">
+          <h2 class="section-title">Rôles spéciaux</h2>
+          <div class="roles-guide-grid roles-guide-grid-3">
+            <div class="role-card role-card-innocent">
+              <span class="role-card-icon" aria-hidden="true">🛡️</span>
+              <strong>Nul</strong>
+              <p>Innocent ou imposteur sans pouvoir spécial — le plus courant.</p>
+            </div>
+            <div class="role-card role-card-inspecteur">
+              <span class="role-card-icon" aria-hidden="true">🔍</span>
+              <strong>Inspecteur</strong>
+              <p>Quand quelqu’un meurt, une flèche indique où se trouve le corps.</p>
+            </div>
+            <div class="role-card role-card-medecin">
+              <span class="role-card-icon" aria-hidden="true">🩺</span>
+              <strong>Médecin</strong>
+              <p>Choisit un joueur vivant : s’il meurt, <strong>1 chance sur 3</strong> de revivre (roue à 3 cases, une fois).</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="lobby-section">
+          <h2 class="section-title">Joueurs <span id="playerCountBadge" class="player-count-badge">0</span></h2>
+          <ul id="playerList" class="player-list"></ul>
+        </section>
 
         <p id="lobbyStatus" class="lobby-wait">En attente de l’hôte…</p>
         <button id="startBtn" type="button" class="btn-primary hidden">Démarrer la partie</button>
@@ -157,7 +208,7 @@
         <p id="lobbyError" class="error hidden"></p>
       </div>
 
-      <div id="screenControls" class="panel hidden">
+      <div id="screenControls" class="panel panel-glass hidden">
         <h1>Comment tu joues ?</h1>
         <p class="tagline center">Choisis ton type d’appareil avant d’entrer dans le labyrinthe.</p>
         <p id="controlMobileHint" class="tagline center small-hint hidden">
@@ -187,14 +238,25 @@
 
     <div id="resurrectPrompt" class="resurrect-prompt hidden" role="dialog" aria-modal="true">
       <div class="resurrect-card">
-        <h2>Seconde chance ?</h2>
-        <p class="tagline center">
-          Le labyrinthe t’offre une résurrection rare… Veux-tu revenir parmi les vivants ?
+        <h2 id="resurrectTitle">Protection du médecin</h2>
+        <p id="resurrectHint" class="tagline center small-hint">
+          <strong>1 chance sur 3</strong> de revivre. Tourne la roue une fois.
         </p>
         <p id="resurrectCountdown" class="resurrect-countdown">—</p>
+        <div class="wheel-stage">
+          <div class="wheel-pointer" aria-hidden="true"></div>
+          <div id="resurrectWheel" class="wheel-disc" aria-hidden="true"></div>
+          <div id="wheelCenterCap" class="wheel-center-cap" aria-hidden="true">1/3</div>
+          <span class="wheel-seg-label wheel-seg-label-win" aria-hidden="true">VIE</span>
+        </div>
+        <div id="wheelLegend" class="wheel-legend" aria-hidden="true">
+          <span id="wheelLegendWin" class="wheel-legend-win">1 segment vert = revivre</span>
+          <span id="wheelLegendLose" class="wheel-legend-lose">2 segments gris = rien</span>
+        </div>
+        <p id="resurrectWheelMsg" class="resurrect-wheel-msg"></p>
         <div class="resurrect-actions">
-          <button id="resurrectYes" type="button" class="btn-primary">Oui, ressusciter</button>
-          <button id="resurrectNo" type="button" class="btn-secondary">Non, rester mort</button>
+          <button id="resurrectSpinBtn" type="button" class="btn-primary">Tourner la roue</button>
+          <button id="resurrectNo" type="button" class="btn-secondary">Rester fantôme</button>
         </div>
       </div>
     </div>
@@ -202,6 +264,10 @@
     <div id="returnBanner" class="return-banner hidden" aria-live="polite">
       <span class="return-banner-glow"></span>
       <span id="returnBannerText">Un joueur est de retour</span>
+    </div>
+
+    <div id="deathBanner" class="death-banner hidden" aria-live="assertive">
+      <span id="deathBannerText">Un joueur est mort</span>
     </div>
 
     <div id="endScreen" class="end-screen hidden">
@@ -213,6 +279,15 @@
         </p>
         <button id="endRematchBtn" type="button" class="btn-primary hidden">Rejouer (hôte)</button>
         <button id="endHomeBtn" type="button" class="btn-secondary end-home-btn">Retour au menu</button>
+      </div>
+    </div>
+
+    <div id="doctorPicker" class="doctor-picker hidden" role="dialog" aria-modal="true">
+      <div class="doctor-card panel-glass">
+        <h2>Choisir un patient</h2>
+        <p class="tagline center small-hint">Joueurs vivants — protection unique, 1/3 de revivre s’il meurt.</p>
+        <ul id="doctorTargetList" class="doctor-target-list"></ul>
+        <button id="doctorPickerClose" type="button" class="btn-secondary">Annuler</button>
       </div>
     </div>
 
