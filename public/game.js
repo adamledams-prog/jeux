@@ -43,7 +43,14 @@ const roleHud = document.getElementById("roleHud");
 const timerHud = document.getElementById("timerHud");
 const aliveHud = document.getElementById("aliveHud");
 const killBtn = document.getElementById("killBtn");
+const sabotageBtn = document.getElementById("sabotageBtn");
 const powerPicker = document.getElementById("powerPicker");
+const rolePickerSection = document.getElementById("rolePickerSection");
+const rolePickerHint = document.getElementById("rolePickerHint");
+const roleManualWaitHint = document.getElementById("roleManualWaitHint");
+const rolePicker = document.getElementById("rolePicker");
+const manualRolesCheck = document.getElementById("manualRolesCheck");
+const impostorCountRow = document.getElementById("impostorCountRow");
 const powerBar = document.getElementById("powerBar");
 const resurrectPrompt = document.getElementById("resurrectPrompt");
 const resurrectCountdown = document.getElementById("resurrectCountdown");
@@ -99,11 +106,13 @@ const COLOR_OPTIONS = [
   "#84cc16",
 ];
 
-const VIEW_RADIUS = 340;
-const VIEW_RADIUS_BOOST = 130;
+const MAP_SCALE = 1.4;
+const VIEW_RADIUS = Math.round(340 * MAP_SCALE);
+const VIEW_RADIUS_BOOST = Math.round(130 * MAP_SCALE);
 const VISION_EXTRA_WALLS = 1;
-const KILL_RANGE = 70;
-const PLAYER_RADIUS = 14;
+const KILL_RANGE = Math.round(70 * MAP_SCALE);
+const PLAYER_RADIUS = Math.round(14 * MAP_SCALE);
+const PLAYER_DRAW_SIZE = Math.round(26 * MAP_SCALE);
 
 const POWER_CATALOG = {
   portal: {
@@ -152,6 +161,42 @@ const POWER_ORDER = [
   "disguise",
   "freeze",
 ];
+
+const ROLE_SPECIAL_CATALOG = {
+  inspecteur: {
+    emoji: "🔍",
+    name: "Inspecteur",
+    hint: "Flèche vers les corps quand quelqu’un meurt",
+  },
+  medecin: {
+    emoji: "🩺",
+    name: "Médecin",
+    hint: "Protège un joueur (1/3 de revivre) — min. 3 innocents",
+  },
+  visionneur: {
+    emoji: "👁️",
+    name: "Visionneur",
+    hint: "Vision : les autres ne voient qu’à 3 cases (8 s) — recharge 5 s",
+  },
+  saboteur: {
+    emoji: "⚡",
+    name: "Saboteur",
+    hint: "Imposteur — sabotage des pouvoirs 8 s (recharge 40 s)",
+  },
+};
+
+const ROLE_SPECIAL_ORDER = ["inspecteur", "medecin", "visionneur", "saboteur"];
+
+let enabledRoleSpecials = {
+  inspecteur: true,
+  medecin: true,
+  visionneur: true,
+  saboteur: true,
+};
+let sabotageCooldownUntil = 0;
+let visionneurCooldownUntil = 0;
+let useManualRoles = false;
+let roleAssignments = {};
 
 function isOnlineHosted() {
   const h = window.location.hostname;
@@ -213,6 +258,7 @@ const POWER_FAIL_MSG = {
   no_move: "Dash bloqué (mur ou pas de place).",
   bad_place: "Impossible de poser le portail ici.",
   spam: "Trop vite — attends un instant.",
+  sabotage: "Sabotage en cours — pouvoirs coupés.",
 };
 
 function clearJoinRetry() {
@@ -332,14 +378,28 @@ let camera = { x: 0, y: 0 };
 let visibility = null;
 let controlMode = null;
 let myPowers = {
-  portal: true,
-  invisible: true,
-  speed: true,
+  portal: false,
+  invisible: false,
+  speed: false,
   vision: false,
   dash: false,
   disguise: false,
   freeze: false,
 };
+
+function defaultPoolPowers() {
+  return {
+    portal: true,
+    invisible: true,
+    speed: true,
+    vision: false,
+    dash: false,
+    disguise: false,
+    freeze: false,
+  };
+}
+
+let poolPowers = defaultPoolPowers();
 const joystick = { active: false, vx: 0, vy: 0, pointerId: null };
 const JOY_RADIUS = 48;
 let lastKillEmitAt = 0;
@@ -505,6 +565,25 @@ function powersEnabledInLobby() {
   return lobbyData?.settings?.powersEnabled !== false;
 }
 
+function serverTimeMs() {
+  return state?.t ?? Date.now();
+}
+
+function isPowersBlocked() {
+  const eff = state?.effects;
+  if (!eff) return false;
+  if (state?.gameOver) return false;
+  return (eff.powersBlockedUntil ?? 0) > serverTimeMs();
+}
+
+function isVisionBlurForMe() {
+  const eff = state?.effects;
+  if (!eff) return false;
+  if (state?.gameOver) return false;
+  if ((eff.visionBlurUntil ?? 0) <= serverTimeMs()) return false;
+  return myId !== eff.visionBlurExcludeId;
+}
+
 function powersFromServer(powers) {
   const next = {};
   for (const id of POWER_ORDER) {
@@ -535,30 +614,28 @@ function updatePowerLobbySection() {
   powerPicker.classList.toggle("powers-read-only", !isHost);
   if (enabled) {
     powerPickerHint.textContent = isHost
-      ? "Choisis les pouvoirs — ils seront les mêmes pour tous les joueurs."
-      : "Pouvoirs choisis par l’hôte pour toute la partie (lecture seule).";
+      ? "Active les pouvoirs en jeu — chacun est donné à un joueur au hasard (tu ne sauras pas qui)."
+      : "Pouvoirs en jeu choisis par l’hôte — tu découvriras les tiens au début de la partie.";
   }
   if (!enabled) {
     powerCooldownInfo.classList.add("hidden");
     return;
   }
   if (cds) {
-    const parts = POWER_ORDER.filter((id) => myPowers[id]).map((id) => {
+    const parts = POWER_ORDER.filter((id) => poolPowers[id]).map((id) => {
       const def = POWER_CATALOG[id];
       return `${def.emoji} ${def.name}`;
     });
-    const cdParts = POWER_ORDER.map((id) => {
+    const cdParts = POWER_ORDER.filter((id) => poolPowers[id]).map((id) => {
       const def = POWER_CATALOG[id];
       return `${def.name.toLowerCase()} ${cds[id] ?? 20}s`;
     });
-    if (!isHost) {
-      powerCooldownInfo.textContent = parts.length
-        ? `Actifs : ${parts.join(" · ")} — recharge ${cdParts.join(" · ")}`
-        : `Recharge : ${cdParts.join(" · ")}`;
-      powerCooldownInfo.classList.remove("hidden");
-    } else {
-      powerCooldownInfo.classList.add("hidden");
-    }
+    const poolLabel = parts.length
+      ? `En jeu : ${parts.join(" · ")}`
+      : "Aucun pouvoir sélectionné pour l’instant.";
+    const cdLabel = cdParts.length ? ` — recharge ${cdParts.join(" · ")}` : "";
+    powerCooldownInfo.textContent = `${poolLabel}${cdLabel} · attribution secrète.`;
+    powerCooldownInfo.classList.remove("hidden");
   } else {
     powerCooldownInfo.classList.add("hidden");
   }
@@ -706,22 +783,204 @@ function applyLobbyData(data) {
   if (data.settings) {
     impostorSelect.value = String(data.settings.impostors);
     timerSelect.value = String(data.settings.timerSec);
-    if (isHost) syncHostPowerSettingsUi();
+    if (isHost) {
+      syncHostPowerSettingsUi();
+      syncHostRoleSettingsUi();
+    }
   }
   const me = data.players.find((p) => p.id === myId);
   if (me) {
     myColor = me.color;
   }
   if (data.settings?.roomPowers) {
-    myPowers = powersFromServer(data.settings.roomPowers);
-  } else if (me?.powers) {
-    myPowers = powersFromServer(me.powers);
+    poolPowers = powersFromServer(data.settings.roomPowers);
   }
   updateLobbyUi();
   updateMapVoteUi();
   updatePowerPickerUi();
   updatePowerLobbySection();
+  applyRoleConfigFromLobby(data.settings?.roleConfig);
+  updateRolePickerUi();
+  updateRoleLobbySection();
   drawLobbyMapPreview(data.mapPreview);
+}
+
+function applyRoleConfigFromLobby(rc) {
+  enabledRoleSpecials = {
+    inspecteur: rc?.enabledSpecials?.inspecteur !== false,
+    medecin: rc?.enabledSpecials?.medecin !== false,
+    visionneur: rc?.enabledSpecials?.visionneur !== false,
+    saboteur: rc?.enabledSpecials?.saboteur !== false,
+  };
+  useManualRoles = Boolean(rc?.useManualRoles);
+  roleAssignments = rc?.assignments ? { ...rc.assignments } : {};
+}
+
+function emitRoleConfig() {
+  if (!isHost) return;
+  socket.emit("setRoleConfig", {
+    useManualRoles,
+    enabledSpecials: { ...enabledRoleSpecials },
+  });
+}
+
+function syncHostRoleSettingsUi() {
+  if (!manualRolesCheck) return;
+  manualRolesCheck.checked = useManualRoles;
+  if (impostorCountRow) {
+    impostorCountRow.classList.toggle("disabled", useManualRoles);
+  }
+  if (impostorSelect) impostorSelect.disabled = useManualRoles;
+}
+
+function updateRolePickerUi() {
+  document.querySelectorAll(".role-toggle").forEach((btn) => {
+    const id = btn.dataset.roleSpecial;
+    btn.classList.toggle("equipped", Boolean(enabledRoleSpecials[id]));
+  });
+}
+
+function updateRoleLobbySection() {
+  const manual = useManualRoles;
+  rolePicker.classList.toggle("roles-read-only", !isHost);
+  rolePickerSection.classList.toggle("roles-manual-mode", manual);
+  if (isHost) {
+    roleManualWaitHint.classList.add("hidden");
+    rolePickerHint.classList.remove("hidden");
+    rolePickerHint.textContent = manual
+      ? "Active les rôles spéciaux, puis assigne chaque joueur dans la liste (secret)."
+      : "Active les rôles tirés au sort — nombre d’imposteurs via le menu hôte.";
+  } else {
+    rolePickerHint.classList.toggle("hidden", manual);
+    roleManualWaitHint.classList.toggle("hidden", !manual);
+    if (!manual) {
+      const parts = [];
+      if (enabledRoleSpecials.inspecteur) parts.push("Inspecteur");
+      if (enabledRoleSpecials.medecin) parts.push("Médecin");
+      if (enabledRoleSpecials.visionneur) parts.push("Visionneur");
+      if (enabledRoleSpecials.saboteur) parts.push("Saboteur");
+      rolePickerHint.textContent = parts.length
+        ? `Rôles possibles : ${parts.join(", ")} (tirage au sort).`
+        : "Aucun rôle spécial pour cette partie.";
+    }
+  }
+  syncHostRoleSettingsUi();
+}
+
+function buildRolePicker() {
+  if (!rolePicker) return;
+  rolePicker.innerHTML = "";
+  for (const id of ROLE_SPECIAL_ORDER) {
+    const def = ROLE_SPECIAL_CATALOG[id];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "power-toggle role-toggle equipped";
+    btn.dataset.roleSpecial = id;
+    btn.innerHTML = `
+      <span class="power-emoji">${def.emoji}</span>
+      <span class="power-meta">
+        <strong>${def.name}</strong>
+        <span>${def.hint}</span>
+      </span>`;
+    btn.addEventListener("click", () => {
+      if (!isHost) return;
+      const next = { ...enabledRoleSpecials, [id]: !enabledRoleSpecials[id] };
+      if (!ROLE_SPECIAL_ORDER.some((k) => next[k])) return;
+      enabledRoleSpecials = next;
+      updateRolePickerUi();
+      emitRoleConfig();
+    });
+    rolePicker.appendChild(btn);
+  }
+}
+buildRolePicker();
+
+if (manualRolesCheck) {
+  manualRolesCheck.addEventListener("change", () => {
+    useManualRoles = manualRolesCheck.checked;
+    updateRoleLobbySection();
+    emitRoleConfig();
+    updateLobbyUi();
+  });
+}
+
+function emitPlayerRole(playerId, camp, specialRole) {
+  if (!isHost || !useManualRoles) return;
+  socket.emit("setPlayerRole", { playerId, camp, specialRole });
+}
+
+function playerAssignment(playerId) {
+  return roleAssignments[playerId] || { camp: "innocent", specialRole: "nul" };
+}
+
+function buildPlayerRoleControls(p) {
+  const wrap = document.createElement("div");
+  wrap.className = "player-role-controls";
+
+  const a = playerAssignment(p.id);
+
+  const campSel = document.createElement("select");
+  campSel.className = "player-role-select";
+  campSel.setAttribute("aria-label", `Camp de ${p.name}`);
+  for (const [val, label] of [
+    ["innocent", "Innocent"],
+    ["impostor", "Imposteur"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = label;
+    campSel.appendChild(opt);
+  }
+  campSel.value = a.camp === "impostor" ? "impostor" : "innocent";
+
+  const specSel = document.createElement("select");
+  specSel.className = "player-role-select";
+  specSel.setAttribute("aria-label", `Rôle spécial de ${p.name}`);
+  const addSpec = (val, label) => {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = label;
+    specSel.appendChild(opt);
+  };
+  const refillSpecOptions = (camp) => {
+    specSel.innerHTML = "";
+    addSpec("nul", "—");
+    if (camp === "impostor") {
+      if (enabledRoleSpecials.saboteur) addSpec("saboteur", "Saboteur");
+    } else {
+      if (enabledRoleSpecials.inspecteur) addSpec("inspecteur", "Inspecteur");
+      if (enabledRoleSpecials.medecin) addSpec("medecin", "Médecin");
+      if (enabledRoleSpecials.visionneur) addSpec("visionneur", "Visionneur");
+    }
+  };
+
+  const camp = campSel.value === "impostor" ? "impostor" : "innocent";
+  campSel.value = camp;
+  refillSpecOptions(camp);
+  const validSpecials =
+    camp === "impostor"
+      ? ["nul", "saboteur"]
+      : ["nul", "inspecteur", "medecin", "visionneur"];
+  specSel.value = validSpecials.includes(a.specialRole) ? a.specialRole : "nul";
+
+  campSel.addEventListener("change", () => {
+    const nextCamp = campSel.value;
+    refillSpecOptions(nextCamp);
+    specSel.value = "nul";
+    roleAssignments[p.id] = { camp: nextCamp, specialRole: "nul" };
+    emitPlayerRole(p.id, nextCamp, "nul");
+  });
+
+  specSel.addEventListener("change", () => {
+    const camp = campSel.value;
+    const special = specSel.value;
+    roleAssignments[p.id] = { camp, specialRole: special };
+    emitPlayerRole(p.id, camp, special);
+  });
+
+  wrap.appendChild(campSel);
+  wrap.appendChild(specSel);
+  return wrap;
 }
 
 function showHome() {
@@ -732,6 +991,7 @@ function showHome() {
   hudTop.classList.add("hidden");
   endScreen.classList.add("hidden");
   killBtn.classList.add("hidden");
+  sabotageBtn?.classList.add("hidden");
   powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
   screenControls.classList.add("hidden");
@@ -752,10 +1012,12 @@ function showLobby() {
   phase = "lobby";
   screenHome.classList.add("hidden");
   screenLobby.classList.remove("hidden");
+  if (typeof LobbyMorpion?.reset === "function") LobbyMorpion.reset();
   overlay.classList.remove("hidden");
   hudTop.classList.add("hidden");
   endScreen.classList.add("hidden");
   killBtn.classList.add("hidden");
+  sabotageBtn?.classList.add("hidden");
   powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
   screenControls.classList.add("hidden");
@@ -770,6 +1032,7 @@ function showControlPicker() {
   overlay.classList.remove("hidden");
   hudTop.classList.add("hidden");
   killBtn.classList.add("hidden");
+  sabotageBtn?.classList.add("hidden");
   powerBar.classList.add("hidden");
   joystickZone.classList.add("hidden");
   const touch = Comfort?.isCoarseTouch?.();
@@ -827,7 +1090,7 @@ buildColorPicker();
 function updatePowerPickerUi() {
   document.querySelectorAll(".power-toggle").forEach((btn) => {
     const id = btn.dataset.power;
-    btn.classList.toggle("equipped", Boolean(myPowers[id]));
+    btn.classList.toggle("equipped", Boolean(poolPowers[id]));
   });
 }
 
@@ -847,12 +1110,13 @@ function buildPowerPicker() {
       </span>`;
     btn.addEventListener("click", () => {
       if (!isHost || !powersEnabledInLobby()) return;
-      const next = { ...myPowers, [id]: !myPowers[id] };
+      const next = { ...poolPowers, [id]: !poolPowers[id] };
       const count = POWER_ORDER.filter((k) => next[k]).length;
       if (count === 0) return;
-      myPowers = next;
+      poolPowers = next;
       updatePowerPickerUi();
-      socket.emit("setPowers", myPowers);
+      updatePowerLobbySection();
+      socket.emit("setPowers", poolPowers);
     });
     powerPicker.appendChild(btn);
   }
@@ -861,7 +1125,14 @@ buildPowerPicker();
 
 function emitUsePower(id) {
   const me = state?.players?.[myId];
-  if (phase !== "playing" || state?.gameOver || !me?.alive || me.frozen || powerClickLock) {
+  if (
+    phase !== "playing" ||
+    state?.gameOver ||
+    !me?.alive ||
+    me.frozen ||
+    powerClickLock ||
+    isPowersBlocked()
+  ) {
     return;
   }
   const cd = me.powerCooldownMs?.[id] || 0;
@@ -944,6 +1215,7 @@ function openDoctorPicker() {
 
 function onDoctorPowerClick() {
   if (mySpecialRole !== "medecin" || myDoctorPickDone) return;
+  if (isPowersBlocked()) return;
   Sfx?.unlock();
   openDoctorPicker();
 }
@@ -952,13 +1224,16 @@ function buildPowerBar() {
   powerBar.innerHTML = "";
   if (state?.powerSettings && state.powerSettings.enabled === false) {
     if (mySpecialRole === "medecin" && !myDoctorPickDone) appendDoctorPowerBtn();
+    if (mySpecialRole === "visionneur") appendVisionneurPowerBtn();
     return;
   }
   if (lobbyData?.settings?.powersEnabled === false) {
     if (mySpecialRole === "medecin" && !myDoctorPickDone) appendDoctorPowerBtn();
+    if (mySpecialRole === "visionneur") appendVisionneurPowerBtn();
     return;
   }
   if (mySpecialRole === "medecin") appendDoctorPowerBtn();
+  if (mySpecialRole === "visionneur") appendVisionneurPowerBtn();
   for (const id of POWER_ORDER) {
     if (!myPowers[id]) continue;
     const def = POWER_CATALOG[id];
@@ -1000,6 +1275,58 @@ function appendDoctorPowerBtn() {
   powerBar.appendChild(btn);
 }
 
+function appendVisionneurPowerBtn() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "power-btn visionneur-power-btn";
+  btn.dataset.power = "visionneur";
+  btn.textContent = "👁️ Vision";
+  btn.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    emitVisionneurPulse();
+  });
+  powerBar.appendChild(btn);
+}
+
+function emitVisionneurPulse() {
+  const me = state?.players?.[myId];
+  if (
+    phase !== "playing" ||
+    state?.gameOver ||
+    !me?.alive ||
+    me.frozen ||
+    mySpecialRole !== "visionneur" ||
+    isPowersBlocked()
+  ) {
+    return;
+  }
+  const cdLeft = visionneurCooldownUntil - serverTimeMs();
+  if (cdLeft > 0) return;
+  Sfx?.unlock();
+  socket.emit("visionneurPulse");
+}
+
+function emitSabotage() {
+  const me = state?.players?.[myId];
+  if (
+    phase !== "playing" ||
+    state?.gameOver ||
+    !me?.alive ||
+    me.frozen ||
+    myRole !== "impostor" ||
+    mySpecialRole !== "saboteur" ||
+    isPowersBlocked()
+  ) {
+    return;
+  }
+  const cdLeft = sabotageCooldownUntil - serverTimeMs();
+  if (cdLeft > 0) return;
+  Sfx?.unlock();
+  socket.emit("sabotage");
+}
+
 function powerBtnLabel(id, me) {
   const def = POWER_CATALOG[id];
   const cdMs = me?.powerCooldownMs?.[id] || 0;
@@ -1014,7 +1341,8 @@ function powerBtnLabel(id, me) {
 function updatePowerBarUi(me) {
   const powersOn = state?.powerSettings?.enabled !== false;
   const showRoleAction =
-    mySpecialRole === "medecin" && me?.alive && !state?.gameOver;
+    (mySpecialRole === "medecin" && me?.alive && !state?.gameOver) ||
+    (mySpecialRole === "visionneur" && me?.alive && !state?.gameOver);
   const show =
     phase === "playing" &&
     controlMode &&
@@ -1026,12 +1354,25 @@ function updatePowerBarUi(me) {
   }
   powerBar.classList.toggle("hidden", !show || powerBar.children.length === 0);
   if (!show || !me) return;
+  const sabotaged = isPowersBlocked();
   for (const btn of powerBar.children) {
     const id = btn.dataset.power;
-    if (id === "doctor") continue;
+    if (id === "doctor") {
+      btn.disabled = me.frozen || sabotaged || myDoctorPickDone;
+      continue;
+    }
+    if (id === "visionneur") {
+      const cdLeft = Math.max(0, visionneurCooldownUntil - serverTimeMs());
+      const blurOn = (state?.effects?.visionBlurUntil ?? 0) > serverTimeMs();
+      btn.disabled = cdLeft > 0 || me.frozen || sabotaged || blurOn;
+      btn.classList.toggle("on-cooldown", cdLeft > 0);
+      btn.textContent =
+        cdLeft > 0 ? `👁️ Vision ${Math.ceil(cdLeft / 1000)}s` : "👁️ Vision";
+      continue;
+    }
     const cdMs = me.powerCooldownMs?.[id] || 0;
     const onCooldown = cdMs > 0;
-    btn.disabled = onCooldown || me.frozen || powerClickLock;
+    btn.disabled = onCooldown || me.frozen || powerClickLock || sabotaged;
     btn.classList.toggle("on-cooldown", onCooldown);
     btn.classList.toggle("portal-ready", id === "portal" && Boolean(me.portal));
     btn.textContent = powerBtnLabel(id, me);
@@ -1125,6 +1466,13 @@ function requestKill() {
   haptic("kill");
   socket.emit("kill");
 }
+
+sabotageBtn?.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  if (!sabotageBtn.classList.contains("ready")) return;
+  e.preventDefault();
+  emitSabotage();
+});
 
 killBtn.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -1280,6 +1628,14 @@ socket.on("lobby", (data) => {
 socket.on("gameStarted", (data) => {
   clearJoinPending();
   applyGameRoleFromServer(data);
+  resetMapAmbient();
+  sabotageCooldownUntil = 0;
+  visionneurCooldownUntil = 0;
+  if (data?.powers) {
+    myPowers = powersFromServer(data.powers);
+  } else if (data?.powersEnabled === false) {
+    myPowers = powersFromServer({});
+  }
   endScreen.classList.add("hidden");
   endCard.classList.remove("victory", "defeat");
   endRematchBtn.classList.add("hidden");
@@ -1291,6 +1647,7 @@ socket.on("gameStarted", (data) => {
     killPressed = false;
     killHoldUntil = 0;
     resetDeathTracking();
+    powerBar.innerHTML = "";
     Sfx?.startGame();
     haptic("start");
     buildPowerBar();
@@ -1496,7 +1853,9 @@ function setRoleHudDisplay(mapNameOverride) {
     "role-impostor",
     "role-ghost",
     "role-inspecteur",
-    "role-medecin"
+    "role-medecin",
+    "role-visionneur",
+    "role-saboteur"
   );
   const mapBit = hudMapName ? ` · ${hudMapName}` : "";
 
@@ -1511,9 +1870,15 @@ function setRoleHudDisplay(mapNameOverride) {
     roleHud.textContent = ghostLine;
     return;
   }
-  if (myRole === "impostor") {
+  if (myRole === "impostor" && mySpecialRole === "saboteur") {
+    roleHud.classList.add("role-saboteur");
+    roleHud.textContent = `Saboteur ⚡${mapBit}`;
+  } else if (myRole === "impostor") {
     roleHud.classList.add("role-impostor");
     roleHud.textContent = `Imposteur 🔪${mapBit}`;
+  } else if (mySpecialRole === "visionneur") {
+    roleHud.classList.add("role-visionneur");
+    roleHud.textContent = `Visionneur 👁️${mapBit}`;
   } else if (mySpecialRole === "inspecteur") {
     roleHud.classList.add("role-inspecteur");
     roleHud.textContent = `Inspecteur 🔍${mapBit}`;
@@ -1842,6 +2207,40 @@ function drawDeathBursts(now) {
   }
 }
 
+socket.on("sabotageResult", (result) => {
+  if (result?.ok) {
+    sabotageCooldownUntil = serverTimeMs() + (result.cooldownMs || 40000);
+    Sfx?.power?.();
+    haptic("power");
+    if (timerHud) {
+      timerHud.dataset.powerHint = "Sabotage — pouvoirs coupés 8 s";
+      powerToastUntil = Date.now() + 2800;
+    }
+  } else if (result?.reason === "cooldown" || result?.reason === "active") {
+    haptic("powerFail");
+  }
+});
+
+socket.on("visionneurResult", (result) => {
+  if (result?.ok) {
+    visionneurCooldownUntil = serverTimeMs() + (result.cooldownMs || 5000);
+    Sfx?.vision?.();
+    haptic("power");
+    if (timerHud) {
+      timerHud.dataset.powerHint = "Vision — les autres voient à 3 cases";
+      powerToastUntil = Date.now() + 2800;
+    }
+  } else {
+    if (result?.reason === "cooldown" || result?.reason === "active") {
+      haptic("powerFail");
+    } else if (result?.reason === "sabotage" && timerHud) {
+      timerHud.dataset.powerHint = POWER_FAIL_MSG.sabotage;
+      powerToastUntil = Date.now() + 2200;
+      haptic("powerFail");
+    }
+  }
+});
+
 socket.on("powerUsed", ({ powerId, ok, reason, action }) => {
   powerClickLock = false;
   if (ok) {
@@ -2053,6 +2452,7 @@ function updateLobbyUi() {
   }
   drawLobbyMapPreview(lobbyData.mapPreview);
   updateMapVoteUi();
+  updateRoleLobbySection();
   hostSettings.classList.toggle("hidden", !isHost);
 
   document.querySelectorAll(".color-swatch").forEach((btn) => {
@@ -2082,6 +2482,9 @@ function updateLobbyUi() {
       badge.className = "host-badge";
       badge.textContent = "Hôte";
       li.appendChild(badge);
+    }
+    if (isHost && useManualRoles) {
+      li.appendChild(buildPlayerRoleControls(p));
     }
     playerList.appendChild(li);
   }
@@ -2217,6 +2620,11 @@ function hasKillLineOfSight(x0, y0, x1, y1, maze, tile) {
 }
 
 function myViewRadius(me) {
+  if (isVisionBlurForMe()) {
+    const tile = state?.map?.tile ?? Math.round(40 * MAP_SCALE);
+    const tiles = state?.effects?.visionBlurTileRadius ?? 3;
+    return tile * tiles;
+  }
   if (me?.visionActive) return VIEW_RADIUS + VIEW_RADIUS_BOOST;
   return VIEW_RADIUS;
 }
@@ -2268,6 +2676,11 @@ function localPlayerIsGhost() {
 
 const mapAmbientDots = [];
 let mapAmbientReady = false;
+
+function resetMapAmbient() {
+  mapAmbientReady = false;
+  mapAmbientDots.length = 0;
+}
 
 function ensureMapAmbient(map) {
   if (mapAmbientReady || !map) return;
@@ -2534,7 +2947,7 @@ function playerDrawName(p, isMe) {
 
 function drawCorpseBody(p, t) {
   const { x, y } = playerCorpsePos(p);
-  const size = 26;
+  const size = PLAYER_DRAW_SIZE;
   const bob = Math.sin(t * 2.2) * 0.5;
   ctx.save();
   ctx.translate(x, y + bob);
@@ -2592,7 +3005,7 @@ function drawGhostCube(p, isMe, t) {
 }
 
 function drawPlayerCube(p, isMe, dead) {
-  const size = 26;
+  const size = PLAYER_DRAW_SIZE;
   ctx.save();
   ctx.translate(p.x, p.y);
   ctx.rotate(p.angle);
@@ -2662,6 +3075,31 @@ function updateKillButton(me) {
   killReadyWas = ready;
 }
 
+function updateSabotageButton(me) {
+  if (!sabotageBtn) return;
+  const show =
+    phase === "playing" &&
+    myRole === "impostor" &&
+    mySpecialRole === "saboteur" &&
+    me?.alive &&
+    !state?.gameOver;
+  sabotageBtn.classList.toggle("hidden", !show);
+  if (!show) return;
+  const cdLeft = Math.max(0, sabotageCooldownUntil - serverTimeMs());
+  const globalActive = isPowersBlocked();
+  const ready = cdLeft <= 0 && !globalActive;
+  sabotageBtn.classList.toggle("ready", ready);
+  sabotageBtn.disabled = !ready;
+  sabotageBtn.classList.toggle("on-cooldown", cdLeft > 0);
+  if (globalActive) {
+    sabotageBtn.textContent = "Sabotage…";
+  } else if (cdLeft > 0) {
+    sabotageBtn.textContent = `Sabotage ${Math.ceil(cdLeft / 1000)}s`;
+  } else {
+    sabotageBtn.textContent = "Sabotage";
+  }
+}
+
 function updateHud() {
   if (phase !== "playing" || !state || !myId) return;
   const hint = timerHud.dataset.powerHint;
@@ -2674,6 +3112,9 @@ function updateHud() {
   aliveHud.textContent = `Innocents vivants : ${state.innocentsAlive ?? "—"}`;
   const me = state.players[myId];
   setRoleHudDisplay();
+  updateSabotageButton(me);
+  updateKillButton(me);
+  updatePowerBarUi(me);
   if (me?.frozen && !wasFrozen) {
     Sfx?.frozenHit();
     haptic("frozen");
@@ -2702,8 +3143,6 @@ function updateHud() {
     lastTimerBeepSec = -1;
   }
 
-  updateKillButton(me);
-  updatePowerBarUi(me);
 }
 
 function drawScreenVignette(t) {
@@ -2759,7 +3198,7 @@ function render() {
     drawMaze(state.map, visibility, t);
     drawMapAmbient(state.map, visibility, t);
     if (me && me.alive) drawPlayerGlow(me.x, me.y, viewR, t);
-    if (iAmGhost && me) drawPlayerGlow(me.x, me.y, Math.max(viewR, 120), t);
+    if (iAmGhost && me) drawPlayerGlow(me.x, me.y, Math.max(viewR, Math.round(120 * MAP_SCALE)), t);
   }
 
   const { maze, tile } = state.map;

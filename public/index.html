@@ -107,13 +107,19 @@
         <div id="hostSettings" class="host-settings hidden">
           <h2 class="section-title">Paramètres (hôte)</h2>
           <div class="settings-grid">
-            <div class="setting-row">
+            <div class="setting-row" id="impostorCountRow">
               <label for="impostorSelect">Imposteurs</label>
               <select id="impostorSelect">
                 <option value="1">1 imposteur</option>
                 <option value="2">2 imposteurs</option>
                 <option value="3">3 imposteurs</option>
               </select>
+            </div>
+            <div class="setting-row setting-row-check">
+              <label class="check-label" for="manualRolesCheck">
+                <input id="manualRolesCheck" type="checkbox" />
+                Assigner les rôles manuellement
+              </label>
             </div>
             <div class="setting-row">
               <label for="timerSelect">Durée</label>
@@ -167,7 +173,7 @@
         <section id="powerPickerSection" class="lobby-section">
           <h2 class="section-title">Pouvoirs de la partie</h2>
           <p id="powerPickerHint" class="tagline center small-hint">
-            L’hôte choisit les mêmes pouvoirs pour tout le monde.
+            L’hôte active les pouvoirs en jeu — chacun est attribué secrètement à un joueur.
           </p>
           <p id="powerDisabledMsg" class="tagline center small-hint hidden">
             Les pouvoirs sont désactivés pour cette partie.
@@ -176,8 +182,19 @@
           <div id="powerPicker" class="power-picker"></div>
         </section>
 
+        <section id="rolePickerSection" class="lobby-section">
+          <h2 class="section-title">Rôles de la partie</h2>
+          <p id="rolePickerHint" class="tagline center small-hint">
+            L’hôte active les rôles spéciaux (tirage au sort ou assignation manuelle).
+          </p>
+          <p id="roleManualWaitHint" class="tagline center small-hint hidden">
+            L’hôte choisit les rôles de chaque joueur — tu les découvriras en partie.
+          </p>
+          <div id="rolePicker" class="power-picker role-picker"></div>
+        </section>
+
         <section class="lobby-section roles-guide">
-          <h2 class="section-title">Rôles spéciaux</h2>
+          <h2 class="section-title">Aide — rôles spéciaux</h2>
           <div class="roles-guide-grid roles-guide-grid-3">
             <div class="role-card role-card-innocent">
               <span class="role-card-icon" aria-hidden="true">🛡️</span>
@@ -194,12 +211,44 @@
               <strong>Médecin</strong>
               <p>Choisit un joueur vivant : s’il meurt, <strong>1 chance sur 3</strong> de revivre (roue à 3 cases, une fois).</p>
             </div>
+            <div class="role-card role-card-visionneur">
+              <span class="role-card-icon" aria-hidden="true">👁️</span>
+              <strong>Visionneur</strong>
+              <p>Bouton Vision : tous les autres ne voient plus qu’à <strong>3 cases</strong> (8 s). Recharge 5 s.</p>
+            </div>
+            <div class="role-card role-card-saboteur">
+              <span class="role-card-icon" aria-hidden="true">⚡</span>
+              <strong>Saboteur</strong>
+              <p>Imposteur — Sabotage : bloque tous les pouvoirs (pas Tuer) 8 s. Recharge 40 s.</p>
+            </div>
           </div>
         </section>
 
         <section class="lobby-section">
           <h2 class="section-title">Joueurs <span id="playerCountBadge" class="player-count-badge">0</span></h2>
           <ul id="playerList" class="player-list"></ul>
+        </section>
+
+        <section id="lobbyMorpion" class="lobby-morpion" aria-label="Morpion contre l’IA">
+          <h2 class="section-title">Morpion en attendant</h2>
+          <p class="tagline center small-hint">Tu commences — l’IA est en face. Chacun son jeu dans le lobby.</p>
+          <div class="morpion-stage">
+            <div class="morpion-side morpion-side-player">
+              <span class="morpion-avatar" aria-hidden="true">🙂</span>
+              <strong>Toi</strong>
+              <span class="morpion-mark morpion-mark-x" aria-hidden="true">×</span>
+            </div>
+            <div class="morpion-board-wrap">
+              <p id="morpionStatus" class="morpion-status">À toi — tu commences (×)</p>
+              <div id="morpionBoard" class="morpion-board" role="grid" aria-label="Grille de morpion"></div>
+              <button id="morpionReset" type="button" class="btn-secondary morpion-reset">Rejouer</button>
+            </div>
+            <div class="morpion-side morpion-side-ai">
+              <span class="morpion-avatar" aria-hidden="true">🤖</span>
+              <strong>IA</strong>
+              <span class="morpion-mark morpion-mark-o" aria-hidden="true">○</span>
+            </div>
+          </div>
         </section>
 
         <p id="lobbyStatus" class="lobby-wait">En attente de l’hôte…</p>
@@ -293,6 +342,10 @@
 
     <div id="powerBar" class="power-bar hidden" aria-label="Pouvoirs"></div>
 
+    <button id="sabotageBtn" type="button" class="sabotage-btn hidden" aria-label="Sabotage">
+      Sabotage
+    </button>
+
     <button id="killBtn" type="button" class="kill-btn hidden" aria-label="Tuer">Tuer</button>
 
     <div id="joystickZone" class="joystick-zone hidden" aria-hidden="true">
@@ -339,6 +392,7 @@
     <script src="/runtime-config.js"></script>
     <script src="sfx.js"></script>
     <script src="comfort.js"></script>
+    <script src="lobby-morpion.js"></script>
     <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
     <script src="game.js"></script>
   </body>

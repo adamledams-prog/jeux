@@ -1,6 +1,7 @@
 const MAP_W = 25;
 const MAP_H = 15;
-const TILE = 40;
+const MAP_SCALE = 1.4;
+const TILE = Math.round(40 * MAP_SCALE);
 
 function createWallMaze() {
   return Array.from({ length: MAP_H }, () => Array(MAP_W).fill(1));
@@ -140,6 +141,8 @@ for (const id of MAP_IDS) {
 module.exports = {
   MAP_W,
   MAP_H,
+  MAP_SCALE,
+  TILE,
   MAP_IDS,
   MAP_CATALOG,
   MAP_SPAWNS,

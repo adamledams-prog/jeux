@@ -2,23 +2,22 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
-const { MAP_W, MAP_H, MAP_IDS, MAP_CATALOG, MAP_SPAWNS } = require("./maps");
+const { MAP_W, MAP_H, MAP_IDS, MAP_CATALOG, MAP_SPAWNS, TILE, MAP_SCALE } = require("./maps");
 
 const PORT = process.env.PORT || 3000;
 const TICK_MS = 50;
-const TILE = 40;
-const PLAYER_RADIUS = 14;
+const PLAYER_RADIUS = Math.round(14 * MAP_SCALE);
 const PLAYER_SPEED = 180;
 const GHOST_SPEED_MULT = 3;
-const KILL_RANGE = 70;
+const KILL_RANGE = Math.round(70 * MAP_SCALE);
 const MIN_SPAWN_DIST = TILE * 3.2;
 const KILL_COOLDOWN_MS = 25000;
 const POWER_DURATION_MS = 4000;
 const POWER_COOLDOWN_MIN_SEC = 12;
 const POWER_COOLDOWN_MAX_SEC = 100;
 const SPEED_BOOST_MULT = 1.4;
-const DASH_DISTANCE = 78;
-const FREEZE_RADIUS = 112;
+const DASH_DISTANCE = Math.round(78 * MAP_SCALE);
+const FREEZE_RADIUS = Math.round(112 * MAP_SCALE);
 const FREEZE_DURATION_MS = 2000;
 const POWER_USE_MIN_INTERVAL_MS = 150;
 const DASH_MIN_MOVE_PX = 6;
@@ -26,6 +25,11 @@ const LOBBY_ROOM_MAX_AGE_MS = 45 * 60 * 1000;
 const RESURRECT_OFFER_MS = 14000;
 const DOCTOR_WHEEL_ODDS = 1 / 3;
 const DOCTOR_WHEEL_SEGMENTS = 3;
+const SABOTAGE_DURATION_MS = 8000;
+const SABOTAGE_COOLDOWN_MS = 40000;
+const VISIONNEUR_DURATION_MS = 8000;
+const VISIONNEUR_ABILITY_COOLDOWN_MS = 5000;
+const VISIONNEUR_TILE_RADIUS = 3;
 const POWER_IDS = [
   "portal",
   "invisible",
@@ -73,6 +77,37 @@ function mergePowers(powers) {
     if (powers[id] !== undefined) base[id] = Boolean(powers[id]);
   }
   return base;
+}
+
+function emptyPlayerPowers() {
+  const o = {};
+  for (const id of POWER_IDS) o[id] = false;
+  return o;
+}
+
+function normalizePlayerPowers(powers) {
+  const o = emptyPlayerPowers();
+  if (!powers || typeof powers !== "object") return o;
+  for (const id of POWER_IDS) {
+    if (powers[id] !== undefined) o[id] = Boolean(powers[id]);
+  }
+  return o;
+}
+
+/** Chaque pouvoir actif du pool est attribué à un joueur aléatoire (l’hôte ne voit pas qui). */
+function assignPowersFromPool(room) {
+  ensureRoomSettings(room);
+  const active = [...room.players.values()].filter((p) => p.online !== false);
+  for (const p of room.players.values()) {
+    p.powers = emptyPlayerPowers();
+  }
+  if (!room.settings.powersEnabled) return;
+  const pool = POWER_IDS.filter((id) => room.settings.roomPowers[id]);
+  if (pool.length === 0 || active.length === 0) return;
+  for (const powerId of pool) {
+    const target = active[Math.floor(Math.random() * active.length)];
+    target.powers[powerId] = true;
+  }
 }
 
 const TIMER_OPTIONS = [90, 120, 150, 180];
@@ -336,6 +371,19 @@ function pickSpreadSpawns(mapId, playerCount) {
   return picked;
 }
 
+function defaultRoleConfig() {
+  return {
+    useManualRoles: false,
+    enabledSpecials: {
+      inspecteur: true,
+      medecin: true,
+      visionneur: true,
+      saboteur: true,
+    },
+    assignments: {},
+  };
+}
+
 function defaultSettings() {
   return {
     impostors: 1,
@@ -343,15 +391,168 @@ function defaultSettings() {
     powersEnabled: true,
     powerCooldownSec: defaultPowerCooldownSec(),
     roomPowers: defaultPowers(),
+    roleConfig: defaultRoleConfig(),
   };
 }
 
-function syncAllPlayerPowers(room) {
+const INNOCENT_SPECIAL_ROLE_IDS = ["inspecteur", "medecin", "visionneur"];
+const IMPOSTOR_SPECIAL_ROLE_IDS = ["saboteur"];
+const SPECIAL_ROLE_IDS = [...INNOCENT_SPECIAL_ROLE_IDS, ...IMPOSTOR_SPECIAL_ROLE_IDS];
+
+function ensureRoleConfig(room) {
   ensureRoomSettings(room);
-  const powers = mergePowers(room.settings.roomPowers);
-  for (const p of room.players.values()) {
-    p.powers = { ...powers };
+  const rc = room.settings.roleConfig;
+  if (!rc || typeof rc !== "object") {
+    room.settings.roleConfig = defaultRoleConfig();
+    return;
   }
+  if (typeof rc.useManualRoles !== "boolean") rc.useManualRoles = false;
+  if (!rc.enabledSpecials || typeof rc.enabledSpecials !== "object") {
+    rc.enabledSpecials = {
+      inspecteur: true,
+      medecin: true,
+      visionneur: true,
+      saboteur: true,
+    };
+  }
+  for (const id of SPECIAL_ROLE_IDS) {
+    if (rc.enabledSpecials[id] === undefined) rc.enabledSpecials[id] = true;
+    else rc.enabledSpecials[id] = Boolean(rc.enabledSpecials[id]);
+  }
+  if (!rc.assignments || typeof rc.assignments !== "object") rc.assignments = {};
+}
+
+function defaultPlayerAssignment() {
+  return { camp: "innocent", specialRole: "nul" };
+}
+
+function ensurePlayerRoleAssignment(room, playerId) {
+  ensureRoleConfig(room);
+  if (!room.settings.roleConfig.assignments[playerId]) {
+    room.settings.roleConfig.assignments[playerId] = defaultPlayerAssignment();
+  }
+}
+
+function pruneRoleAssignments(room) {
+  ensureRoleConfig(room);
+  const ids = new Set(room.players.keys());
+  for (const id of Object.keys(room.settings.roleConfig.assignments)) {
+    if (!ids.has(id)) delete room.settings.roleConfig.assignments[id];
+  }
+  for (const id of ids) ensurePlayerRoleAssignment(room, id);
+}
+
+function syncImpostorCountFromAssignments(room) {
+  ensureRoleConfig(room);
+  if (!room.settings.roleConfig.useManualRoles) return;
+  let n = 0;
+  for (const [id, p] of room.players) {
+    if (p.online === false) continue;
+    const a = room.settings.roleConfig.assignments[id];
+    if (a?.camp === "impostor") n++;
+  }
+  if (n >= 1 && n <= 3) room.settings.impostors = n;
+}
+
+function lobbySettingsForViewer(room, viewerId) {
+  ensureRoomSettings(room);
+  ensureRoleConfig(room);
+  const s = room.settings;
+  const rc = s.roleConfig;
+  const roleConfig = {
+    useManualRoles: rc.useManualRoles,
+    enabledSpecials: { ...rc.enabledSpecials },
+  };
+  if (viewerId === room.hostId) {
+    roleConfig.assignments = { ...rc.assignments };
+  }
+  return {
+    impostors: s.impostors,
+    timerSec: s.timerSec,
+    powersEnabled: s.powersEnabled,
+    powerCooldownSec: { ...s.powerCooldownSec },
+    roomPowers: mergePowers(s.roomPowers),
+    roleConfig,
+  };
+}
+
+function validateManualRoles(room) {
+  ensureRoleConfig(room);
+  pruneRoleAssignments(room);
+  const onlineIds = [...room.players.keys()].filter(
+    (id) => room.players.get(id)?.online !== false
+  );
+  let impostors = 0;
+  let innocents = 0;
+  let inspecteurs = 0;
+  let medecins = 0;
+  let visionneurs = 0;
+  let saboteurs = 0;
+  const en = room.settings.roleConfig.enabledSpecials;
+
+  for (const id of onlineIds) {
+    const a = room.settings.roleConfig.assignments[id] || defaultPlayerAssignment();
+    if (a.camp === "impostor") {
+      impostors++;
+      if (a.specialRole === "saboteur") saboteurs++;
+      else if (a.specialRole && a.specialRole !== "nul") {
+        return { ok: false, message: "Rôle spécial imposteur invalide (Saboteur uniquement)." };
+      }
+    } else {
+      innocents++;
+      if (a.specialRole === "inspecteur") inspecteurs++;
+      if (a.specialRole === "medecin") medecins++;
+      if (a.specialRole === "visionneur") visionneurs++;
+      if (
+        a.specialRole &&
+        a.specialRole !== "nul" &&
+        !INNOCENT_SPECIAL_ROLE_IDS.includes(a.specialRole)
+      ) {
+        return { ok: false, message: "Rôle spécial innocent invalide." };
+      }
+    }
+  }
+
+  if (innocents < 1) {
+    return { ok: false, message: "Il faut au moins un innocent." };
+  }
+  if (impostors < 1) {
+    return { ok: false, message: "Il faut au moins un imposteur." };
+  }
+  if (impostors >= onlineIds.length) {
+    return { ok: false, message: "Trop d’imposteurs pour ce nombre de joueurs." };
+  }
+  if (inspecteurs > 1) {
+    return { ok: false, message: "Un seul inspecteur par partie." };
+  }
+  if (medecins > 1) {
+    return { ok: false, message: "Un seul médecin par partie." };
+  }
+  if (inspecteurs > 0 && !en.inspecteur) {
+    return { ok: false, message: "L’inspecteur n’est pas activé dans les rôles de la partie." };
+  }
+  if (medecins > 0 && !en.medecin) {
+    return { ok: false, message: "Le médecin n’est pas activé dans les rôles de la partie." };
+  }
+  if (medecins > 0 && innocents < 3) {
+    return {
+      ok: false,
+      message: "Le médecin nécessite au moins 3 innocents (4 joueurs avec 1 imposteur).",
+    };
+  }
+  if (saboteurs > 1) {
+    return { ok: false, message: "Un seul saboteur par partie." };
+  }
+  if (visionneurs > 1) {
+    return { ok: false, message: "Un seul visionneur par partie." };
+  }
+  if (saboteurs > 0 && !en.saboteur) {
+    return { ok: false, message: "Le saboteur n’est pas activé dans les rôles de la partie." };
+  }
+  if (visionneurs > 0 && !en.visionneur) {
+    return { ok: false, message: "Le visionneur n’est pas activé dans les rôles de la partie." };
+  }
+  return { ok: true };
 }
 
 function pickFreeColor(room) {
@@ -380,23 +581,25 @@ function uniqueNameInRoom(room, requested) {
 
 function lobbyPlayer(id, name, room) {
   ensureRoomSettings(room);
+  ensurePlayerRoleAssignment(room, id);
   return {
     id,
     name: uniqueNameInRoom(room, name),
     color: pickFreeColor(room),
-    powers: mergePowers(room.settings.roomPowers),
+    powers: emptyPlayerPowers(),
   };
 }
 
-function lobbyPayload(room) {
+function lobbyPayload(room, viewerId) {
   ensureRoomSettings(room);
+  pruneRoleAssignments(room);
   const previewId = getLobbyPreviewMapId(room);
   const previewMaze = MAP_CATALOG[previewId].maze;
   return {
     code: room.code,
     hostId: room.hostId,
     status: room.status,
-    settings: room.settings,
+    settings: lobbySettingsForViewer(room, viewerId),
     mapOptions: MAP_IDS.map((id) => ({ id, name: MAP_CATALOG[id].name })),
     mapVoteCounts: tallyMapVotes(room),
     mapVotes: { ...(room.mapVotes || {}) },
@@ -405,7 +608,6 @@ function lobbyPayload(room) {
       id: p.id,
       name: p.name,
       color: p.color,
-      powers: mergePowers(p.powers),
     })),
   };
 }
@@ -448,7 +650,9 @@ function initGameFields(p, spawn, maze, mapId) {
   p.corpseX = 0;
   p.corpseY = 0;
   p.powerCooldownUntil = emptyPowerCooldowns();
-  p.powers = mergePowers(p.powers);
+  p.sabotageCooldownUntil = 0;
+  p.visionneurAbilityCooldownUntil = 0;
+  p.powers = emptyPlayerPowers();
   const fixed = pushCircleOutOfWalls(maze, p.x, p.y, PLAYER_RADIUS);
   p.x = fixed.x;
   p.y = fixed.y;
@@ -512,13 +716,16 @@ function ensureRoomSettings(room) {
   for (const id of POWER_IDS) {
     cds[id] = clampPowerCooldownSec(incoming[id] ?? cds[id]);
   }
+  const prevRoleConfig = room.settings?.roleConfig;
   room.settings = {
     impostors: [1, 2, 3].includes(impostors) ? impostors : 1,
     timerSec: TIMER_OPTIONS.includes(timerSec) ? timerSec : 120,
     powersEnabled,
     powerCooldownSec: cds,
     roomPowers: mergePowers(room.settings?.roomPowers),
+    roleConfig: prevRoleConfig,
   };
+  ensureRoleConfig(room);
 }
 
 function getPowerCooldownMs(room, powerId) {
@@ -527,9 +734,45 @@ function getPowerCooldownMs(room, powerId) {
   return clampPowerCooldownSec(sec) * 1000;
 }
 
+function applyManualRoles(room) {
+  ensureRoleConfig(room);
+  for (const p of room.players.values()) {
+    if (p.online === false) continue;
+    const a = room.settings.roleConfig.assignments[p.id] || defaultPlayerAssignment();
+    p.role = a.camp === "impostor" ? "impostor" : "innocent";
+    if (p.role === "impostor") {
+      p.specialRole = a.specialRole === "saboteur" ? "saboteur" : "nul";
+    } else {
+      p.specialRole = INNOCENT_SPECIAL_ROLE_IDS.includes(a.specialRole) ? a.specialRole : "nul";
+    }
+    p.doctorTargetId = null;
+    p.doctorProtected = false;
+    p.doctorReviveUsed = false;
+  }
+}
+
+function resetOfflinePlayerRoles(room) {
+  for (const p of room.players.values()) {
+    if (p.online === false) {
+      p.role = "innocent";
+      p.specialRole = "nul";
+      p.doctorTargetId = null;
+      p.doctorProtected = false;
+    }
+  }
+}
+
 function assignRoles(room) {
   ensureRoomSettings(room);
-  const ids = [...room.players.keys()];
+  ensureRoleConfig(room);
+  resetOfflinePlayerRoles(room);
+  if (room.settings.roleConfig.useManualRoles) {
+    applyManualRoles(room);
+    return;
+  }
+  const ids = [...room.players.keys()].filter(
+    (id) => room.players.get(id)?.online !== false
+  );
   const maxImpostors = Math.min(room.settings.impostors, Math.max(0, ids.length - 1));
   const shuffled = [...ids].sort(() => Math.random() - 0.5);
   for (const p of room.players.values()) {
@@ -547,10 +790,79 @@ function assignRoles(room) {
 }
 
 function assignSpecialRoles(room) {
-  const innocents = [...room.players.values()].filter((p) => p.role === "innocent");
-  const pool = [...innocents].sort(() => Math.random() - 0.5);
-  if (pool.length >= 1) pool[0].specialRole = "inspecteur";
-  if (pool.length >= 3) pool[1].specialRole = "medecin";
+  ensureRoleConfig(room);
+  const en = room.settings.roleConfig.enabledSpecials;
+  const innocents = [...room.players.values()]
+    .filter((p) => p.role === "innocent" && p.online !== false)
+    .sort(() => Math.random() - 0.5);
+  const impostors = [...room.players.values()]
+    .filter((p) => p.role === "impostor" && p.online !== false)
+    .sort(() => Math.random() - 0.5);
+  let idx = 0;
+  if (en.inspecteur && innocents.length > idx) {
+    innocents[idx].specialRole = "inspecteur";
+    idx++;
+  }
+  if (en.medecin && innocents.length >= 3 && innocents.length > idx) {
+    innocents[idx].specialRole = "medecin";
+    idx++;
+  }
+  if (en.visionneur && innocents.length > idx) {
+    innocents[idx].specialRole = "visionneur";
+    idx++;
+  }
+  if (en.saboteur && impostors.length >= 1) {
+    impostors[0].specialRole = "saboteur";
+  }
+}
+
+function isSabotageActive(room, now = Date.now()) {
+  return Boolean(room.sabotageUntil && room.sabotageUntil > now);
+}
+
+function clearGlobalEffects(room) {
+  room.sabotageUntil = 0;
+  room.visionneurBlurUntil = 0;
+  room.visionneurExcludedId = null;
+}
+
+function trySabotage(room, p) {
+  if (room.gameOver || p.role !== "impostor" || !p.alive || p.online === false) {
+    return { ok: false, reason: "not_allowed" };
+  }
+  if (p.specialRole !== "saboteur") return { ok: false, reason: "not_saboteur" };
+  const now = Date.now();
+  if (p.frozenUntil > now) return { ok: false, reason: "frozen" };
+  if (now < (p.sabotageCooldownUntil || 0)) return { ok: false, reason: "cooldown" };
+  if (isSabotageActive(room, now)) return { ok: false, reason: "active" };
+  room.sabotageUntil = now + SABOTAGE_DURATION_MS;
+  p.sabotageCooldownUntil = now + SABOTAGE_COOLDOWN_MS;
+  return { ok: true, until: room.sabotageUntil, cooldownMs: SABOTAGE_COOLDOWN_MS };
+}
+
+function tryVisionneurPulse(room, p) {
+  if (room.gameOver || p.role !== "innocent" || !p.alive || p.online === false) {
+    return { ok: false, reason: "not_allowed" };
+  }
+  if (p.specialRole !== "visionneur") return { ok: false, reason: "not_visionneur" };
+  const now = Date.now();
+  if (isSabotageActive(room, now)) return { ok: false, reason: "sabotage" };
+  if (p.frozenUntil > now) return { ok: false, reason: "frozen" };
+  if (now < (p.visionneurAbilityCooldownUntil || 0)) {
+    return { ok: false, reason: "cooldown" };
+  }
+  if (room.visionneurBlurUntil && room.visionneurBlurUntil > now) {
+    return { ok: false, reason: "active" };
+  }
+  room.visionneurBlurUntil = now + VISIONNEUR_DURATION_MS;
+  room.visionneurExcludedId = p.id;
+  p.visionneurAbilityCooldownUntil = now + VISIONNEUR_ABILITY_COOLDOWN_MS;
+  return {
+    ok: true,
+    until: room.visionneurBlurUntil,
+    cooldownMs: VISIONNEUR_ABILITY_COOLDOWN_MS,
+    tileRadius: VISIONNEUR_TILE_RADIUS,
+  };
 }
 
 function gameStartedPayload(room, p, rematch) {
@@ -563,6 +875,8 @@ function gameStartedPayload(room, p, rematch) {
     rematch: Boolean(rematch),
     mapId: room.playMapId,
     mapName: room.playMapId ? MAP_CATALOG[room.playMapId].name : undefined,
+    powers: { ...p.powers },
+    powersEnabled: room.settings.powersEnabled !== false,
   };
 }
 
@@ -587,6 +901,7 @@ function checkGameEnd(room) {
     room.gameOver = true;
     room.winner = "impostors";
     room.endReason = "Tous les innocents ont été éliminés.";
+    clearGlobalEffects(room);
     return;
   }
 
@@ -594,6 +909,7 @@ function checkGameEnd(room) {
     room.gameOver = true;
     room.winner = "innocents";
     room.endReason = "Tous les imposteurs ont été éliminés.";
+    clearGlobalEffects(room);
     return;
   }
 
@@ -601,6 +917,7 @@ function checkGameEnd(room) {
     room.gameOver = true;
     room.winner = "innocents";
     room.endReason = "Le temps est écoulé — des innocents sont encore en vie.";
+    clearGlobalEffects(room);
   }
 }
 
@@ -716,9 +1033,10 @@ function usePlayerPower(room, p, powerId) {
   ensureRoomSettings(room);
   if (!room.settings.powersEnabled) return { ok: false, reason: "disabled" };
   if (!p.alive || p.online === false) return { ok: false, reason: "dead" };
-  p.powers = mergePowers(p.powers);
-  if (!p.powers[powerId]) return { ok: false, reason: "not_equipped" };
   const now = Date.now();
+  if (isSabotageActive(room, now)) return { ok: false, reason: "sabotage" };
+  p.powers = normalizePlayerPowers(p.powers);
+  if (!p.powers[powerId]) return { ok: false, reason: "not_equipped" };
   expireTimedBuffs(p, now);
   if (p.frozenUntil > now) return { ok: false, reason: "frozen" };
   if (!p.powerCooldownUntil) p.powerCooldownUntil = emptyPowerCooldowns();
@@ -824,7 +1142,10 @@ function purgeStaleLobbyRooms() {
 }
 
 function broadcastLobby(room) {
-  io.to(room.code).emit("lobby", lobbyPayload(room));
+  for (const [id] of room.players) {
+    const sock = io.sockets.sockets.get(id);
+    if (sock) sock.emit("lobby", lobbyPayload(room, id));
+  }
 }
 
 function broadcastState(room) {
@@ -850,6 +1171,12 @@ function broadcastState(room) {
       cooldownSec: room.settings.powerCooldownSec,
     },
     t: now,
+    effects: {
+      powersBlockedUntil: room.sabotageUntil || 0,
+      visionBlurUntil: room.visionneurBlurUntil || 0,
+      visionBlurExcludeId: room.visionneurExcludedId || null,
+      visionBlurTileRadius: VISIONNEUR_TILE_RADIUS,
+    },
   });
 }
 
@@ -880,6 +1207,9 @@ function handleDisconnect(socket) {
 function removePlayerFromRoom(room, playerId) {
   room.players.delete(playerId);
   if (room.mapVotes) delete room.mapVotes[playerId];
+  if (room.settings?.roleConfig?.assignments) {
+    delete room.settings.roleConfig.assignments[playerId];
+  }
   if (room.players.size === 0) {
     rooms.delete(room.code);
     return;
@@ -920,7 +1250,7 @@ function tryRejoinPlayer(socket, room, name) {
     id: socket.id,
     code: room.code,
     isHost: room.hostId === socket.id,
-    lobby: lobbyPayload(room),
+    lobby: lobbyPayload(room, socket.id),
   });
   socket.emit("gameStarted", gameStartedPayload(room, p, false));
   broadcastState(room);
@@ -938,6 +1268,7 @@ function beginPlayingRound(room, rematch) {
   room.endReason = null;
   room.startedAt = Date.now();
   room.timerEndsAt = room.startedAt + room.settings.timerSec * 1000;
+  clearGlobalEffects(room);
 
   const active = [...room.players.values()].filter((p) => p.online !== false);
   const spawns = pickSpreadSpawns(room.playMapId, active.length);
@@ -953,6 +1284,7 @@ function beginPlayingRound(room, rematch) {
     spawnIdx++;
   }
   assignRoles(room);
+  assignPowersFromPool(room);
 
   for (const [id, p] of room.players) {
     if (p.online === false) continue;
@@ -1125,7 +1457,7 @@ io.on("connection", (socket) => {
       id: socket.id,
       code,
       isHost: true,
-      lobby: lobbyPayload(room),
+      lobby: lobbyPayload(room, socket.id),
     });
     broadcastLobby(room);
   });
@@ -1161,7 +1493,7 @@ io.on("connection", (socket) => {
         id: socket.id,
         code: normalized,
         isHost: room.hostId === socket.id,
-        lobby: lobbyPayload(room),
+        lobby: lobbyPayload(room, socket.id),
       });
       return;
     }
@@ -1172,7 +1504,7 @@ io.on("connection", (socket) => {
       id: socket.id,
       code: normalized,
       isHost: room.hostId === socket.id,
-      lobby: lobbyPayload(room),
+      lobby: lobbyPayload(room, socket.id),
     });
     broadcastLobby(room);
   });
@@ -1202,7 +1534,7 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.status !== "lobby") return;
     if (room.hostId !== socket.id) {
-      socket.emit("errorMsg", { message: "Seul l’hôte choisit les pouvoirs de la partie." });
+      socket.emit("errorMsg", { message: "Seul l’hôte choisit les pouvoirs actifs pour la partie." });
       return;
     }
     ensureRoomSettings(room);
@@ -1217,7 +1549,64 @@ io.on("connection", (socket) => {
       return;
     }
     room.settings.roomPowers = next;
-    syncAllPlayerPowers(room);
+    broadcastLobby(room);
+  });
+
+  socket.on("setRoleConfig", (data) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.hostId !== socket.id || room.status !== "lobby") return;
+    ensureRoleConfig(room);
+    if (typeof data?.useManualRoles === "boolean") {
+      room.settings.roleConfig.useManualRoles = data.useManualRoles;
+    }
+    if (data?.enabledSpecials && typeof data.enabledSpecials === "object") {
+      for (const id of SPECIAL_ROLE_IDS) {
+        if (data.enabledSpecials[id] !== undefined) {
+          room.settings.roleConfig.enabledSpecials[id] = Boolean(data.enabledSpecials[id]);
+        }
+      }
+    }
+    const en = room.settings.roleConfig.enabledSpecials;
+    for (const a of Object.values(room.settings.roleConfig.assignments)) {
+      if (!en.inspecteur && a.specialRole === "inspecteur") a.specialRole = "nul";
+      if (!en.medecin && a.specialRole === "medecin") a.specialRole = "nul";
+      if (!en.visionneur && a.specialRole === "visionneur") a.specialRole = "nul";
+      if (!en.saboteur && a.specialRole === "saboteur") a.specialRole = "nul";
+    }
+    pruneRoleAssignments(room);
+    syncImpostorCountFromAssignments(room);
+    broadcastLobby(room);
+  });
+
+  socket.on("setPlayerRole", (data) => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.hostId !== socket.id || room.status !== "lobby") return;
+    if (!room.settings.roleConfig.useManualRoles) {
+      socket.emit("errorMsg", {
+        message: "Active « Assigner les rôles manuellement » pour choisir chaque joueur.",
+      });
+      return;
+    }
+    const playerId = data?.playerId;
+    if (!playerId || !room.players.has(playerId)) return;
+    ensurePlayerRoleAssignment(room, playerId);
+    const a = room.settings.roleConfig.assignments[playerId];
+    if (data.camp === "impostor" || data.camp === "innocent") {
+      a.camp = data.camp;
+      if (a.camp === "impostor" && a.specialRole !== "saboteur") a.specialRole = "nul";
+      if (a.camp === "innocent" && a.specialRole === "saboteur") a.specialRole = "nul";
+    }
+    if (data.specialRole === "nul") {
+      a.specialRole = "nul";
+    } else if (data.specialRole === "saboteur" && a.camp === "impostor") {
+      a.specialRole = "saboteur";
+    } else if (
+      INNOCENT_SPECIAL_ROLE_IDS.includes(data.specialRole) &&
+      a.camp !== "impostor"
+    ) {
+      a.specialRole = data.specialRole;
+    }
+    syncImpostorCountFromAssignments(room);
     broadcastLobby(room);
   });
 
@@ -1258,9 +1647,16 @@ io.on("connection", (socket) => {
       socket.emit("errorMsg", { message: "Il faut au moins 2 joueurs connectés pour commencer." });
       return;
     }
-    if (room.settings.impostors >= online) {
+    if (!room.settings.roleConfig.useManualRoles && room.settings.impostors >= online) {
       socket.emit("errorMsg", { message: "Trop d’imposteurs pour ce nombre de joueurs." });
       return;
+    }
+    if (room.settings.roleConfig.useManualRoles) {
+      const check = validateManualRoles(room);
+      if (!check.ok) {
+        socket.emit("errorMsg", { message: check.message });
+        return;
+      }
     }
     startRoomGame(room);
   });
@@ -1274,9 +1670,16 @@ io.on("connection", (socket) => {
       socket.emit("errorMsg", { message: "Il faut au moins 2 joueurs pour relancer." });
       return;
     }
-    if (room.settings.impostors >= online) {
+    if (!room.settings.roleConfig.useManualRoles && room.settings.impostors >= online) {
       socket.emit("errorMsg", { message: "Trop d’imposteurs pour ce nombre de joueurs." });
       return;
+    }
+    if (room.settings.roleConfig.useManualRoles) {
+      const check = validateManualRoles(room);
+      if (!check.ok) {
+        socket.emit("errorMsg", { message: check.message });
+        return;
+      }
     }
     beginPlayingRound(room, true);
   });
@@ -1293,6 +1696,10 @@ io.on("connection", (socket) => {
   socket.on("doctorSelect", (targetId) => {
     const room = getRoomForSocket(socket.id);
     if (!room || room.status !== "playing" || room.gameOver) return;
+    if (isSabotageActive(room)) {
+      socket.emit("doctorSelectResult", { ok: false, reason: "sabotage" });
+      return;
+    }
     const p = room.players.get(socket.id);
     if (!p || !p.alive || p.online === false || p.specialRole !== "medecin") {
       socket.emit("doctorSelectResult", { ok: false, reason: "not_medecin" });
@@ -1407,6 +1814,38 @@ io.on("connection", (socket) => {
     socket.emit("resurrectResult", { ok: false, reason: "declined" });
     checkGameEnd(room);
     broadcastState(room);
+  });
+
+  socket.on("sabotage", () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing" || room.gameOver) {
+      socket.emit("sabotageResult", { ok: false, reason: "no_game" });
+      return;
+    }
+    const p = room.players.get(socket.id);
+    if (!p) {
+      socket.emit("sabotageResult", { ok: false, reason: "no_player" });
+      return;
+    }
+    const result = trySabotage(room, p);
+    socket.emit("sabotageResult", result);
+    if (result.ok) broadcastState(room);
+  });
+
+  socket.on("visionneurPulse", () => {
+    const room = getRoomForSocket(socket.id);
+    if (!room || room.status !== "playing" || room.gameOver) {
+      socket.emit("visionneurResult", { ok: false, reason: "no_game" });
+      return;
+    }
+    const p = room.players.get(socket.id);
+    if (!p) {
+      socket.emit("visionneurResult", { ok: false, reason: "no_player" });
+      return;
+    }
+    const result = tryVisionneurPulse(room, p);
+    socket.emit("visionneurResult", result);
+    if (result.ok) broadcastState(room);
   });
 
   socket.on("usePower", (powerId) => {

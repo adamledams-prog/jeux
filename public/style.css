@@ -435,6 +435,129 @@ input:focus {
 
 .panel-lobby {
   width: min(520px, 96vw);
+  max-height: min(92vh, 900px);
+  overflow-y: auto;
+}
+
+.lobby-morpion {
+  margin-top: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.morpion-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.morpion-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 4.5rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.morpion-side strong {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.morpion-avatar {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.morpion-mark {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.morpion-mark-x {
+  color: #38bdf8;
+}
+
+.morpion-mark-o {
+  color: #f472b6;
+}
+
+.morpion-board-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.morpion-status {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: center;
+  min-height: 1.2em;
+}
+
+.morpion-board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  width: min(168px, 42vw);
+  aspect-ratio: 1;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgba(8, 12, 20, 0.85);
+  border: 1px solid var(--border);
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.08);
+}
+
+.morpion-board.morpion-ended {
+  opacity: 0.92;
+}
+
+.morpion-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #3a4558;
+  border-radius: 10px;
+  background: #10151f;
+  color: #e2e8f0;
+  font-size: 1.65rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s, transform 0.1s;
+}
+
+.morpion-cell:not(:disabled):hover {
+  background: #1a2433;
+  transform: scale(1.03);
+}
+
+.morpion-cell.human {
+  color: #38bdf8;
+}
+
+.morpion-cell.ai {
+  color: #f472b6;
+}
+
+.morpion-cell:disabled {
+  cursor: default;
+}
+
+.morpion-reset {
+  font-size: 0.82rem;
+  padding: 0.4rem 0.85rem;
+  min-height: auto;
 }
 
 .lobby-label {
@@ -468,6 +591,7 @@ input:focus {
 .player-list li {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.65rem;
   padding: 0.6rem 0.75rem;
   border-radius: 12px;
@@ -475,6 +599,41 @@ input:focus {
   background: var(--panel-elevated);
   border: 1px solid var(--border);
   transition: border-color 0.12s, transform 0.12s;
+}
+
+.player-role-controls {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding-left: calc(28px + 0.65rem);
+  margin-top: 0.15rem;
+}
+
+.player-role-select {
+  flex: 1;
+  min-width: 7rem;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #3a4558;
+  background: #10151f;
+  color: var(--text);
+}
+
+#impostorCountRow.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.role-picker.roles-read-only .role-toggle {
+  pointer-events: none;
+  cursor: default;
+}
+
+.role-picker.roles-read-only .role-toggle:not(.equipped) {
+  opacity: 0.45;
 }
 
 .player-list li.is-me {
@@ -753,6 +912,12 @@ kbd {
 
 @media (min-width: 420px) {
   .roles-guide-grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 640px) {
+  .roles-guide-grid-3 {
     grid-template-columns: repeat(3, 1fr);
   }
 }
@@ -760,6 +925,24 @@ kbd {
 .role-card-inspecteur {
   border-color: rgba(250, 204, 21, 0.35);
   background: rgba(234, 179, 8, 0.06);
+}
+
+.role-card-visionneur {
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.role-card-saboteur {
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+#roleHud.role-visionneur {
+  border-color: rgba(56, 189, 248, 0.55);
+  color: #7dd3fc;
+}
+
+#roleHud.role-saboteur {
+  border-color: rgba(168, 85, 247, 0.55);
+  color: #e9d5ff;
 }
 
 .role-card-medecin {
@@ -1310,6 +1493,44 @@ select {
 #game {
   cursor: default;
   touch-action: none;
+}
+
+.sabotage-btn {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + 72px);
+  z-index: 14;
+  min-width: 96px;
+  min-height: 48px;
+  padding: 0.7rem 1.1rem;
+  border-radius: 14px;
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: #e9d5ff;
+  background: linear-gradient(180deg, #581c87, #3b0764);
+  border: 2px solid #7e22ce;
+  opacity: 0.45;
+  cursor: not-allowed;
+  touch-action: manipulation;
+  user-select: none;
+  transition: transform 0.12s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.sabotage-btn.ready {
+  opacity: 1;
+  cursor: pointer;
+  color: #fff;
+  box-shadow: 0 0 24px rgba(168, 85, 247, 0.5);
+}
+
+.sabotage-btn.ready:active {
+  transform: scale(0.98);
+}
+
+.sabotage-btn.on-cooldown {
+  opacity: 0.55;
 }
 
 .kill-btn {
