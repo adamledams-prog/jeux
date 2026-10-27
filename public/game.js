@@ -1272,6 +1272,8 @@ socket.on("lobby", (data) => {
   applyLobbyData(data);
   if (data.status === "playing" && (phase === "lobby" || phase === "controlPick") && !myRole) {
     socket.emit("syncGame");
+  } else if (data.status === "playing" && myRole && !controlMode && phase === "lobby") {
+    showControlPicker();
   }
 });
 
@@ -1283,6 +1285,7 @@ socket.on("gameStarted", (data) => {
   endRematchBtn.classList.add("hidden");
   endRematchWait.classList.add("hidden");
 
+  const rematch = Boolean(data?.rematch);
   if (rematch && controlMode) {
     state = null;
     killPressed = false;
@@ -2087,6 +2090,9 @@ function updateLobbyUi() {
     startBtn.classList.add("hidden");
     leaveLobbyBtn.classList.add("hidden");
     lobbyStatus.textContent = "La partie commence… choisis Ordinateur ou Téléphone.";
+    if (myRole && !controlMode && phase !== "playing") {
+      showControlPicker();
+    }
     return;
   }
   leaveLobbyBtn.classList.remove("hidden");
